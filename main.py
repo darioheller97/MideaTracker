@@ -8,7 +8,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from PyQt5.QtCore import QTimer, Qt
+from PyQt5.QtCore import QTimer, Qt, QThread, pyqtSignal
 from PyQt5.QtGui import QColor, QFont, QIcon, QPainter, QPixmap
 from PyQt5.QtWidgets import (
     QApplication,
@@ -33,6 +33,47 @@ import scrapers
 from settings_dialog import SettingsDialog
 
 logger = logging.getLogger(__name__)
+
+# Hide the console windows that subprocesses (Playwright's driver/browser,
+# PowerShell, …) would otherwise flash in a windowed (no-console) build.
+if sys.platform == "win32":
+    import subprocess as _subprocess
+    _CREATE_NO_WINDOW = 0x08000000
+    _orig_popen_init = _subprocess.Popen.__init__
+
+    def _popen_no_window(self, *args, **kwargs):
+        kwargs["creationflags"] = kwargs.get("creationflags", 0) | _CREATE_NO_WINDOW
+        _orig_popen_init(self, *args, **kwargs)
+
+    _subprocess.Popen.__init__ = _popen_no_window
+
+
+class ScanWorker(QThread):
+    """Runs the shop scrapers in a background thread and emits each shop's
+    results as it completes, so the UI can fill in incrementally."""
+
+    shop_done = pyqtSignal(str, list)   # shop_key, items
+    finished_all = pyqtSignal()
+
+    def __init__(self, config: dict):
+        super().__init__()
+        self._config = config
+
+    def run(self):
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+        shops = {k: v for k, v in self._config.get("shops", {}).items()
+                 if v.get("active", True)}
+        with ThreadPoolExecutor(max_workers=5) as pool:
+            futures = {pool.submit(scrapers.scrape_shop, k, v["url"], config=self._config): k
+                       for k, v in shops.items()}
+            for fut in as_completed(futures):
+                k = futures[fut]
+                try:
+                    items = fut.result()
+                except Exception as e:
+                    items = [scrapers._error(k, f"Fehler: {e}", shops[k]["url"])]
+                self.shop_done.emit(k, items)
+        self.finished_all.emit()
 
 HERE = Path(__file__).resolve().parent
 STATE_FILE = HERE / "last_prices.json"
@@ -182,21 +223,39 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _on_scan(self):
+        if getattr(self, "_worker", None) is not None and self._worker.isRunning():
+            return
         self._btn_scan.setEnabled(False)
-        self._btn_scan.setText("🔍 Scanne parallel …")
-        self._update_status("Scanne Shops (parallel) …")
-        QApplication.processEvents()
+        self._btn_scan.setText("🔍 Scanne …")
+        self._table.setRowCount(0)
+        self._scan_results = {}
+        self._best_price = None
+        self._best_shop = ""
+        self._best_title = ""
+        self._scan_total = sum(1 for v in self._config.get("shops", {}).values()
+                               if v.get("active", True))
+        self._scan_done = 0
+        self._update_status(f"Scanne Shops … (0/{self._scan_total})")
 
-        try:
-            results = scrapers.scrape_all_parallel(self._config, max_workers=5)
-            self._display_results(results)
-            self._check_deals(results)
-        except Exception as e:
-            logger.exception("Scan failed")
-            self._update_status(f"❌ Fehler: {e}")
-        finally:
-            self._btn_scan.setEnabled(True)
-            self._btn_scan.setText("🔍 Jetzt scannen")
+        self._worker = ScanWorker(self._config)
+        self._worker.shop_done.connect(self._on_shop_done)
+        self._worker.finished_all.connect(self._on_scan_finished)
+        self._worker.start()
+
+    def _on_shop_done(self, shop_key: str, items: list):
+        """A shop finished — append its rows immediately (incremental)."""
+        self._scan_results[shop_key] = items
+        self._scan_done += 1
+        rows = self._flatten({shop_key: items})
+        self._append_rows(rows)
+        self._update_status(f"Scanne Shops … ({self._scan_done}/{self._scan_total})")
+
+    def _on_scan_finished(self):
+        # Re-render grouped/sorted for a tidy final layout, then notify.
+        self._display_results(self._scan_results)
+        self._check_deals(self._scan_results)
+        self._btn_scan.setEnabled(True)
+        self._btn_scan.setText("🔍 Jetzt scannen")
 
     def _on_auto_scan(self):
         logger.info("Auto-scan triggered")
@@ -206,15 +265,9 @@ class MainWindow(QMainWindow):
     # Display
     # ------------------------------------------------------------------
 
-    def _display_results(self, results: dict[str, list[dict[str, Any]]]):
-        self._table.setRowCount(0)
-        row = 0
-        total_ok = 0
-        best_price = None
-        best_shop = ""
-        best_title = ""
+    def _flatten(self, results: dict[str, list[dict[str, Any]]]) -> list[dict]:
+        """Apply product/price filters and return display row-dicts."""
         location = self._config.get("location", "")
-
         active_kws = []
         for prod in self._config.get("products", []):
             if prod.get("active", True):
@@ -229,18 +282,15 @@ class MainWindow(QMainWindow):
         pr = self._config.get("price_range", {})
         pmin, pmax = pr.get("min", 0), pr.get("max", 99999)
 
-        flat_items = []
+        flat = []
         for shop_key, items in results.items():
             for item in items:
                 title = item.get("title", "")
                 price = item.get("price")
                 has_error = bool(item.get("error"))
-
                 shop_info = self._config.get("shops", {}).get(shop_key, {})
                 is_product_page = shop_info.get("product_page", False)
-
-                # Keyword filter only for search-type shops; trust configured
-                # product pages (their results are the product by definition).
+                # Keyword filter only for search-type shops; trust product pages.
                 if not has_error:
                     if not is_product_page and not _matches_product(title):
                         continue
@@ -250,10 +300,8 @@ class MainWindow(QMainWindow):
                 shop_name = item.get("shop", shop_key)
                 if shop_info.get("local") and location:
                     shop_name = f"{shop_name} {location}"
-
                 in_stock = item.get("in_stock")
-                sort_group = 0 if in_stock is True else (1 if in_stock is False else 2)
-                flat_items.append({
+                flat.append({
                     "shop_name": shop_name,
                     "title": title,
                     "price": price,
@@ -261,86 +309,96 @@ class MainWindow(QMainWindow):
                     "error": item.get("error"),
                     "delivery": item.get("delivery", ""),
                     "url": item.get("url", ""),
-                    "sort_group": sort_group,
+                    "sort_group": 0 if in_stock is True else (1 if in_stock is False else 2),
                     "sort_price": price if price is not None else float("inf"),
                 })
+        return flat
 
-        flat_items.sort(key=lambda x: (x["sort_group"], x["sort_price"]))
+    def _render_row(self, it: dict):
+        """Append one result row to the table; track the best price."""
+        row = self._table.rowCount()
+        self._table.insertRow(row)
+        self._table.setItem(row, 0, QTableWidgetItem(it["shop_name"]))
+        title_item = QTableWidgetItem(it["title"])
+        if it.get("error"):
+            title_item.setForeground(QColor("#e65100"))
+        self._table.setItem(row, 1, title_item)
+        price_item = QTableWidgetItem(_fmt_price(it["price"]))
+        if it["price"] is not None and it["price"] > 0:
+            price_item.setForeground(QColor("#1b5e20"))
+            price_item.setFont(QFont("", -1, QFont.Bold))
+        self._table.setItem(row, 2, price_item)
+        if it["in_stock"] is True:
+            status_text = "✅ Lieferbar"
+        elif it["in_stock"] is False:
+            status_text = "❌ Nicht verfügbar"
+        elif it.get("error"):
+            status_text = it["error"]
+        else:
+            status_text = "❓ Unbekannt"
+        status_item = QTableWidgetItem(status_text)
+        if it["in_stock"] is False or it.get("error"):
+            status_item.setForeground(QColor("#c62828"))
+        elif it["in_stock"] is True:
+            status_item.setForeground(QColor("#1b5e20"))
+        self._table.setItem(row, 3, status_item)
+        self._table.setItem(row, 4, QTableWidgetItem(it.get("delivery", "")))
+        url = it.get("url", "")
+        link_item = QTableWidgetItem(url[:60] + "…" if len(url) > 60 else url)
+        link_item.setToolTip(url)
+        self._table.setItem(row, 5, link_item)
 
+        if it["price"] is not None and it["price"] > 0 and it["in_stock"] is not False:
+            if self._best_price is None or it["price"] < self._best_price:
+                self._best_price = it["price"]
+                self._best_shop = it["shop_name"]
+                self._best_title = it["title"]
+
+    def _append_rows(self, flat: list):
+        for it in flat:
+            self._render_row(it)
+        self._refresh_summary()
+
+    def _refresh_summary(self, total: int | None = None):
+        label = (f"{total} Shops durchsucht" if total is not None
+                 else f"{self._scan_done}/{self._scan_total} Shops")
+        parts = [label]
+        if self._best_price is not None:
+            parts.append(f"🏆 Günstigster: {self._best_price:.2f} € bei {self._best_shop}")
+            if self._best_title:
+                parts.append(f"({self._best_title})")
+        self._lbl_summary.setText(" — ".join(parts))
+
+    def _display_results(self, results: dict[str, list[dict[str, Any]]]):
+        flat = self._flatten(results)
+        flat.sort(key=lambda x: (x["sort_group"], x["sort_price"]))
+        self._table.setRowCount(0)
+        self._best_price = None
+        self._best_shop = ""
+        self._best_title = ""
         current_group = -1
-        for it in flat_items:
+        for it in flat:
             if it["sort_group"] != current_group:
                 current_group = it["sort_group"]
                 headers = {0: "🟢 Verfügbare Produkte", 1: "🔴 Nicht verfügbar", 2: "⚫ Unbekannt / Blockiert"}
-                self._table.insertRow(row)
+                hr = self._table.rowCount()
+                self._table.insertRow(hr)
                 h_item = QTableWidgetItem(headers[current_group])
                 h_item.setBackground(QColor("#f0f0f0"))
-                font = QFont()
-                font.setBold(True)
-                font.setPointSize(10)
-                h_item.setFont(font)
+                hf = QFont(); hf.setBold(True); hf.setPointSize(10)
+                h_item.setFont(hf)
                 h_item.setFlags(Qt.ItemIsEnabled)
-                self._table.setItem(row, 0, h_item)
+                self._table.setItem(hr, 0, h_item)
                 for c in range(1, 6):
                     filler = QTableWidgetItem("")
                     filler.setBackground(QColor("#f0f0f0"))
                     filler.setFlags(Qt.ItemIsEnabled)
-                    self._table.setItem(row, c, filler)
-                row += 1
-
-            self._table.insertRow(row)
-            self._table.setItem(row, 0, QTableWidgetItem(it["shop_name"]))
-            title_item = QTableWidgetItem(it["title"])
-            if it.get("error"):
-                title_item.setForeground(QColor("#e65100"))
-            self._table.setItem(row, 1, title_item)
-            price_text = _fmt_price(it["price"])
-            price_item = QTableWidgetItem(price_text)
-            if it["price"] is not None and it["price"] > 0:
-                price_item.setForeground(QColor("#1b5e20"))
-                price_item.setFont(QFont("", -1, QFont.Bold))
-            self._table.setItem(row, 2, price_item)
-            if it["in_stock"] is True:
-                status_text = "✅ Lieferbar"
-            elif it["in_stock"] is False:
-                status_text = "❌ Nicht verfügbar"
-            elif it.get("error"):
-                status_text = it["error"]
-            else:
-                status_text = "❓ Unbekannt"
-            status_item = QTableWidgetItem(status_text)
-            if it["in_stock"] is False or it.get("error"):
-                status_item.setForeground(QColor("#c62828"))
-            elif it["in_stock"] is True:
-                status_item.setForeground(QColor("#1b5e20"))
-            self._table.setItem(row, 3, status_item)
-            # Delivery time
-            delivery_item = QTableWidgetItem(it.get("delivery", ""))
-            self._table.setItem(row, 4, delivery_item)
-            # Link
-            url = it.get("url", "")
-            link_item = QTableWidgetItem(url[:60] + "…" if len(url) > 60 else url)
-            link_item.setToolTip(url)
-            self._table.setItem(row, 5, link_item)
-
-            if it["price"] is not None and it["price"] > 0 and it["in_stock"] is not False:
-                total_ok += 1
-                if best_price is None or it["price"] < best_price:
-                    best_price = it["price"]
-                    best_shop = it["shop_name"]
-                    best_title = it["title"]
-            row += 1
-
-        summary_parts = [f"{len(results)} Shops durchsucht"]
-        if best_price is not None:
-            summary_parts.append(f"🏆 Günstigster Preis: {best_price:.2f} € bei {best_shop}")
-            if best_title:
-                summary_parts.append(f"({best_title})")
-        self._lbl_summary.setText(" — ".join(summary_parts))
-        # Update tray icon — green if available items exist
-        has_available = any(it["in_stock"] is True for it in flat_items)
+                    self._table.setItem(hr, c, filler)
+            self._render_row(it)
+        has_available = any(it["in_stock"] is True for it in flat)
         if self._tray:
             self._set_tray_icon("available" if has_available else "neutral")
+        self._refresh_summary(total=len(results))
         self._update_status(f"✅ Scan abgeschlossen um {_date_ts()}")
 
     # ------------------------------------------------------------------
@@ -373,9 +431,8 @@ class MainWindow(QMainWindow):
                         self._last_prices[key] = price
                         changed = True
                         if notify:
-                            notifications.notify_deal(
-                                item.get("shop", shop_key), title, price, item.get("url", ""),
-                            )
+                            self._notify(f"💶 Deal! {item.get('shop', shop_key)}",
+                                         f"{title}\n{price:.2f} €")
 
                 # Check delivery time change
                 if delivery:
@@ -385,12 +442,8 @@ class MainWindow(QMainWindow):
                         self._last_prices[dkey] = delivery
                         changed = True
                         if notify:
-                            notifications.notify_deal(
-                                item.get("shop", shop_key),
-                                f"🕐 Lieferzeit geändert: {title}",
-                                0,
-                                item.get("url", ""),
-                            )
+                            self._notify(f"🕐 {item.get('shop', shop_key)}",
+                                         f"Lieferzeit geändert: {title}")
                     elif not last_delivery:
                         self._last_prices[dkey] = delivery
                         changed = True
@@ -418,6 +471,13 @@ class MainWindow(QMainWindow):
         self._status.showMessage(msg)
         if self._tray:
             self._tray.setToolTip(f"Midea PortaSplit — {msg}")
+
+    def _notify(self, title: str, body: str):
+        """Native, non-blocking notification via the tray balloon (no PowerShell)."""
+        if self._tray:
+            self._tray.showMessage(title, body, QSystemTrayIcon.Information, 8000)
+        else:
+            notifications.notify_info(title, body)
 
     def _load_last_prices(self) -> dict[str, float]:
         try:
