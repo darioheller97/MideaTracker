@@ -1,0 +1,69 @@
+{
+  "location": "Leipzig",
+  "local_radius_km": 100,
+  "price_range": {
+    "min": 600,
+    "max": 1800
+  },
+  "check_interval_minutes": 30,
+  "notify_on_deal": true,
+  "tray_mode": true,
+  "products": [
+    {
+      "key": "portasplit_35kw",
+      "name": "Midea PortaSplit 3.5 kW (heizen + kühlen)",
+      "keywords": ["midea portasplit 3.5"],
+      "active": true
+    },
+    {
+      "key": "portasplit_cool",
+      "name": "Midea PortaSplit Cool 2.35 kW (nur kühlen)",
+      "keywords": ["midea portasplit cool"],
+      "active": true
+    },
+    {
+      "key": "portasplit_e",
+      "name": "Midea PortaSplit-E (Mobile Klimaanlage)",
+      "keywords": ["midea portasplit-e"],
+      "active": true
+    }
+  ],
+  "shops": {
+    "amazon": {
+      "name": "Amazon.de", "url": "https://www.amazon.de/dp/B0GX16LKSC", "active": true, "local": false, "product_page": true
+    },
+    "mediamarkt": {
+      "name": "MediaMarkt", "url": "https://www.mediamarkt.de/de/search.html?query=midea+portasplit", "active": true, "local": false, "product_page": false
+    },
+    "obi": {
+      "name": "OBI", "url": "https://www.obi.de/p/8620890/midea-mobile-split-klimaanlage-portasplit", "active": true, "local": true, "product_page": true
+    },
+    "prosatech": {
+      "name": "Prosatech", "url": "https://prosatech.de/Mobile-Klimaanlage-Midea-PortaSplit-35kw", "active": true, "local": false, "product_page": true
+    },
+    "bauhaus": {
+      "name": "BAUHAUS", "url": "https://www.bauhaus.info/klimaanlagen/midea-klimasplitgeraet-portasplit-12000-btu/p/31934233", "active": true, "local": true, "product_page": true
+    },
+    "billiger": {
+      "name": "billiger.de", "url": "https://www.billiger.de/baseproducts/118733-midea-portasplit", "active": true, "local": false, "product_page": false
+    },
+    "euronics": {
+      "name": "Euronics", "url": "https://www.euronics.de/haus-und-haushalt/heizen-lueften-kuehlen/kuehlen/split-klimageraete/porta-split-split-klimageraet-a-4065327878899", "active": true, "local": false, "product_page": true
+    },
+    "toom": {
+      "name": "Toom", "url": "https://www.toom.de/p/mobiles-klimageraet-portasplit-12000-btuh/9350668", "active": true, "local": true, "product_page": true
+    },
+    "hornbach": {
+      "name": "Hornbach", "url": "https://www.hornbach.de/p/klimasplitgeraet-midea-portasplit-12-000-btu-105-m-weiss/12356554/", "active": true, "local": true, "product_page": true
+    },
+    "joybuy": {
+      "name": "Joybuy (JD International)", "url": "https://www.joybuy.de/dp/100615597?siteCode=DE-Site", "active": true, "local": false, "product_page": true
+    },
+    "alternate": {
+      "name": "Alternate", "url": "https://www.alternate.de/Midea/PortaSplit-Klimager%C3%A4t/html/product/100144936?sug=midea%20p", "active": true, "local": false, "product_page": true
+    },
+    "expert": {
+      "name": "Expert", "url": "https://www.expert.de/shop/unsere-produkte/haushalt-kuche/wohnklima/klimagerate/32750011559-portasplit-mobile-split-klimaanlage.html", "active": true, "local": false, "product_page": true
+    }
+  }
+}

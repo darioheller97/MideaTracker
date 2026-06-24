@@ -1,0 +1,23 @@
+# Build artifacts (the .exe is shipped via GitHub Releases, not committed)
+dist/
+build/
+*.spec
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# App runtime state
+last_prices.json
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
