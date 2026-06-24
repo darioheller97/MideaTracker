@@ -8,8 +8,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from PyQt5.QtCore import QTimer, Qt, QThread, pyqtSignal
-from PyQt5.QtGui import QColor, QFont, QIcon, QPainter, QPixmap
+from PyQt5.QtCore import QTimer, Qt, QThread, pyqtSignal, QUrl
+from PyQt5.QtGui import QColor, QFont, QIcon, QPainter, QPixmap, QDesktopServices
 from PyQt5.QtWidgets import (
     QApplication,
     QDialog,
@@ -144,11 +144,22 @@ class MainWindow(QMainWindow):
         self._table = QTableWidget()
         self._table.setColumnCount(6)
         self._table.setHorizontalHeaderLabels(["Shop", "Produkt", "Preis", "Status", "Lieferzeit", "Link"])
-        self._table.horizontalHeader().setStretchLastSection(True)
-        self._table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        header = self._table.horizontalHeader()
+        header.setStretchLastSection(True)
+        # Resizable columns: Interactive lets the user drag column widths.
+        header.setSectionResizeMode(QHeaderView.Interactive)
+        # Set sensible default widths; columns are fully draggable.
+        self._table.setColumnWidth(0, 180)   # Shop
+        self._table.setColumnWidth(1, 260)   # Produkt
+        self._table.setColumnWidth(2, 90)    # Preis (narrow)
+        self._table.setColumnWidth(3, 140)   # Status
+        self._table.setColumnWidth(4, 140)   # Lieferzeit
+        # Link column stretches to fill remaining space.
+        header.setSectionResizeMode(5, QHeaderView.Stretch)
         self._table.setEditTriggers(QTableWidget.NoEditTriggers)
         self._table.setSelectionBehavior(QTableWidget.SelectRows)
         self._table.setAlternatingRowColors(True)
+        self._table.cellDoubleClicked.connect(self._on_cell_double_clicked)
         layout.addWidget(self._table)
 
         self._lbl_summary = QLabel("")
@@ -197,6 +208,17 @@ class MainWindow(QMainWindow):
         if reason == QSystemTrayIcon.DoubleClick:
             self.showNormal()
             self.raise_()
+
+    def _on_cell_double_clicked(self, row: int, col: int):
+        """Open the shop URL in the default browser when the Link cell is double-clicked."""
+        if col != 5:
+            return
+        item = self._table.item(row, 5)
+        if not item:
+            return
+        url = item.toolTip()
+        if url:
+            QDesktopServices.openUrl(QUrl(url))
 
     # ------------------------------------------------------------------
     # Config & Timer
@@ -344,8 +366,9 @@ class MainWindow(QMainWindow):
         self._table.setItem(row, 3, status_item)
         self._table.setItem(row, 4, QTableWidgetItem(it.get("delivery", "")))
         url = it.get("url", "")
-        link_item = QTableWidgetItem(url[:60] + "…" if len(url) > 60 else url)
+        link_item = QTableWidgetItem("🔗 Öffnen")
         link_item.setToolTip(url)
+        link_item.setForeground(QColor("#1565C0"))
         self._table.setItem(row, 5, link_item)
 
         if it["price"] is not None and it["price"] > 0 and it["in_stock"] is not False:

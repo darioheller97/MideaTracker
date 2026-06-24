@@ -1146,7 +1146,6 @@ SCRAPER_REGISTRY: dict[str, callable] = {
     "mediamarkt": scrape_mediamarkt,
     "obi": scrape_obi,
     "bauhaus": scrape_bauhaus,
-    "billiger": scrape_billiger,
     "prosatech": scrape_prosatech,
     "euronics": scrape_euronics,
     "toom": scrape_toom,

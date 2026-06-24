@@ -25,7 +25,6 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "obi": {"name": "OBI", "url": "https://www.obi.de/p/8620890/midea-mobile-split-klimaanlage-portasplit", "active": True, "local": True, "product_page": True},
         "prosatech": {"name": "Prosatech", "url": "https://prosatech.de/Mobile-Klimaanlage-Midea-PortaSplit-35kw", "active": True, "local": False, "product_page": True},
         "bauhaus": {"name": "BAUHAUS", "url": "https://www.bauhaus.info/klimaanlagen/midea-klimasplitgeraet-portasplit-12000-btu/p/31934233", "active": True, "local": True, "product_page": True},
-        "billiger": {"name": "billiger.de", "url": "https://www.billiger.de/baseproducts/118733-midea-portasplit", "active": True, "local": False, "product_page": False},
         "euronics": {"name": "Euronics", "url": "https://www.euronics.de/haus-und-haushalt/heizen-lueften-kuehlen/kuehlen/split-klimageraete/porta-split-split-klimageraet-a-4065327878899", "active": True, "local": False, "product_page": True},
         "toom": {"name": "Toom", "url": "https://www.toom.de/p/mobiles-klimageraet-portasplit-12000-btuh/9350668", "active": True, "local": True, "product_page": True},
         "hornbach": {"name": "Hornbach", "url": "https://www.hornbach.de/p/klimasplitgeraet-midea-portasplit-12-000-btu-105-m-weiss/12356554/", "active": True, "local": True, "product_page": True},

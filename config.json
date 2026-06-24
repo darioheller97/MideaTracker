@@ -44,9 +44,6 @@
     "bauhaus": {
       "name": "BAUHAUS", "url": "https://www.bauhaus.info/klimaanlagen/midea-klimasplitgeraet-portasplit-12000-btu/p/31934233", "active": true, "local": true, "product_page": true
     },
-    "billiger": {
-      "name": "billiger.de", "url": "https://www.billiger.de/baseproducts/118733-midea-portasplit", "active": true, "local": false, "product_page": false
-    },
     "euronics": {
       "name": "Euronics", "url": "https://www.euronics.de/haus-und-haushalt/heizen-lueften-kuehlen/kuehlen/split-klimageraete/porta-split-split-klimageraet-a-4065327878899", "active": true, "local": false, "product_page": true
     },
