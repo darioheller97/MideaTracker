@@ -24,7 +24,7 @@ logging.basicConfig(level=logging.INFO,
 logger = logging.getLogger(__name__)
 
 HERE = Path(__file__).resolve().parent
-SCAN_INTERVAL_MIN = int(os.environ.get("SCAN_INTERVAL_MIN", "20"))
+SCAN_INTERVAL_MIN = int(os.environ.get("SCAN_INTERVAL_MIN", "5"))
 
 app = FastAPI(title="Midea Tracker")
 app.mount("/static", StaticFiles(directory=HERE / "static"), name="static")
