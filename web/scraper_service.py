@@ -110,6 +110,21 @@ def distinct_cities() -> set[str]:
     return cities or {CATALOG.get("location", "Leipzig")}
 
 
+def scrape_city_now(city: str) -> None:
+    """Scrape only the location-aware shops for one city, synchronously.
+    Used after a city change so the new city has data before the page loads."""
+    city = city.strip()
+    if not city:
+        return
+    for key in LOCATION_SHOPS:
+        if not SHOPS.get(key, {}).get("active", True):
+            continue
+        try:
+            db.set_cache(f"{key}|{city.lower()}", _scrape_one(key, city))
+        except Exception:
+            logger.exception("scrape_city_now failed for %s/%s", key, city)
+
+
 def run_cycle() -> None:
     cities = distinct_cities()
     logger.info("Scrape cycle: %d city(ies), %d shops", len(cities), len(SHOPS))

@@ -130,7 +130,9 @@ def update_settings(token: str, city: str = Form(...), min_price: float = Form(0
                     scan_interval_min: int = Form(20)):
     if not db.get_watch(token):
         raise HTTPException(404)
-    db.update_watch(token, city=city.strip() or "Leipzig", min_price=min_price,
+    new_city = city.strip() or "Leipzig"
+    old_city = (db.get_watch(token) or {}).get("city", "")
+    db.update_watch(token, city=new_city, min_price=min_price,
                     max_price=max_price, products=products, last_notified={})
     interval = max(1, scan_interval_min)
     db.set_setting("scan_interval_min", interval)
@@ -141,6 +143,11 @@ def update_settings(token: str, city: str = Form(...), min_price: float = Form(0
             logger.info("Scan interval updated to %d min", interval)
         except Exception:
             logger.exception("Failed to reschedule scrape job")
+    if new_city.lower() != old_city.lower():
+        # Scrape location shops for the new city synchronously so the watch
+        # page shows correct results immediately on redirect (OBI/Toom use
+        # plain HTTP APIs so this completes in a few seconds).
+        svc.scrape_city_now(new_city)
     threading.Thread(target=svc.run_cycle, daemon=True).start()
     return RedirectResponse(url=f"/w/{token}", status_code=303)
 
