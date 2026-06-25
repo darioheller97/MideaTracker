@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mein Midea Tracker</title>
+  <link rel="manifest" href="/manifest.webmanifest">
+  <meta name="theme-color" content="#0ea5e9">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body data-token="{{ watch.token }}" data-appkey="{{ app_server_key }}">
+  <div class="wrap">
+    <h1>❄️ Mein Tracker</h1>
+
+    <div class="card">
+      <div class="bar">
+        <span id="updated" class="muted">Lade…</span>
+        <span>
+          <button id="notifyBtn">🔔 Benachrichtigungen</button>
+          <button id="refreshBtn" title="Aktualisieren">↻</button>
+        </span>
+      </div>
+      <table id="results">
+        <thead><tr><th>Shop</th><th>Produkt</th><th>Preis</th><th>Status</th><th></th></tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+
+    <details class="card">
+      <summary>⚙ Einstellungen</summary>
+      <form method="post" action="/w/{{ watch.token }}/settings">
+        <label>Stadt<input name="city" value="{{ watch.city }}" required></label>
+        <div class="row">
+          <label>Min €<input type="number" name="min_price" value="{{ watch.min_price | int }}"></label>
+          <label>Max €<input type="number" name="max_price" value="{{ watch.max_price | int }}"></label>
+        </div>
+        <fieldset>
+          <legend>Modelle</legend>
+          {% for p in products %}
+          <label class="cb"><input type="checkbox" name="products" value="{{ p.key }}"
+            {% if p.key in watch.products %}checked{% endif %}> {{ p.name }}</label>
+          {% endfor %}
+        </fieldset>
+        <button type="submit">Speichern</button>
+      </form>
+    </details>
+
+    <p class="muted">Privater Link — als Lesezeichen speichern. Auf dem iPhone:
+      „Zum Home-Bildschirm“ hinzufügen, damit Push funktioniert (iOS 16.4+).</p>
+  </div>
+  <script src="/static/app.js"></script>
+</body>
+</html>

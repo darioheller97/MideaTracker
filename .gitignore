@@ -11,6 +11,11 @@ __pycache__/
 # App runtime state
 last_prices.json
 
+# Web app runtime state & secrets
+web/midea.db
+web/.vapid.json
+web/.vapid_private.pem
+
 # Virtual environments
 venv/
 .venv/

@@ -1,0 +1,14 @@
+# Web app (midea.iceatea.me) — in addition to the scraping engine deps
+fastapi
+uvicorn[standard]
+jinja2
+python-multipart
+apscheduler
+pywebpush
+cryptography
+
+# Shared scraping engine (same as the desktop app)
+requests
+lxml
+cssselect
+playwright

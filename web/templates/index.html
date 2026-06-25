@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Midea PortaSplit Tracker</title>
+  <link rel="manifest" href="/manifest.webmanifest">
+  <meta name="theme-color" content="#0ea5e9">
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <div class="wrap">
+    <h1>❄️ Midea PortaSplit Tracker</h1>
+    <p class="muted">Erstelle deinen persönlichen Preis-Wächter. Du bekommst einen
+      privaten Link und optional Push-Benachrichtigungen aufs Handy — kein Konto nötig.</p>
+
+    <form method="post" action="/watch" class="card">
+      <label>Stadt <span class="muted">(für Filialen OBI/Toom)</span>
+        <input name="city" value="{{ default_city }}" required>
+      </label>
+      <div class="row">
+        <label>Min €<input type="number" name="min_price" value="{{ price_range.min }}" min="0" step="10"></label>
+        <label>Max €<input type="number" name="max_price" value="{{ price_range.max }}" min="0" step="10"></label>
+      </div>
+      <fieldset>
+        <legend>Modelle</legend>
+        {% for p in products %}
+        <label class="cb"><input type="checkbox" name="products" value="{{ p.key }}" checked> {{ p.name }}</label>
+        {% endfor %}
+      </fieldset>
+      <button type="submit">Wächter erstellen →</button>
+    </form>
+
+    <p class="muted">Dein Link ist privat. Speichere ihn als Lesezeichen, um später
+      Einstellungen zu ändern.</p>
+  </div>
+</body>
+</html>

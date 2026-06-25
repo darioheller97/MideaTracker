@@ -1,0 +1,120 @@
+"""Shared scraping + notification service.
+
+Scrapes each shop ONCE per cycle (cached for all users); only OBI/Toom are scraped
+per distinct city (cheap JSON APIs). Then each user's watch is evaluated against the
+cached results and a Web Push is sent for new qualifying deals.
+"""
+
+import json
+import logging
+import sys
+from pathlib import Path
+
+# Reuse the desktop scraping engine (no GUI deps).
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+import scrapers  # noqa: E402
+
+from . import db, push  # noqa: E402
+
+logger = logging.getLogger(__name__)
+
+CATALOG = json.loads((ROOT / "config.json").read_text(encoding="utf-8"))
+SHOPS: dict = CATALOG.get("shops", {})
+PRODUCTS: list = CATALOG.get("products", [])
+PRICE_RANGE: dict = CATALOG.get("price_range", {"min": 0, "max": 5000})
+# OBI & Toom are location-aware (per city); everything else is delivery/online → shared.
+LOCATION_SHOPS = {"obi", "toom"}
+
+
+def _cfg(city: str | None) -> dict:
+    c = dict(CATALOG)
+    c["location"] = city or ""
+    return c
+
+
+def _scrape_one(shop_key: str, city: str | None = None) -> list[dict]:
+    info = SHOPS.get(shop_key)
+    if not info:
+        return []
+    try:
+        return scrapers.scrape_shop(shop_key, info["url"], config=_cfg(city))
+    except Exception as e:
+        logger.warning("scrape %s failed: %s", shop_key, e)
+        return [scrapers._error(shop_key, f"Fehler: {e}", info.get("url", ""))]
+
+
+def scrape_catalog(cities: set[str]) -> None:
+    """Scrape location-independent shops once + OBI/Toom per city; write to cache."""
+    for key, info in SHOPS.items():
+        if not info.get("active", True) or key in LOCATION_SHOPS:
+            continue
+        db.set_cache(key, _scrape_one(key))
+    for city in cities:
+        for key in LOCATION_SHOPS:
+            if not SHOPS.get(key, {}).get("active", True):
+                continue
+            db.set_cache(f"{key}|{city.lower()}", _scrape_one(key, city))
+
+
+def results_for(city: str) -> list[dict]:
+    """Assemble cached results for a city: shared shops + that city's OBI/Toom."""
+    items: list[dict] = []
+    for key, info in SHOPS.items():
+        if not info.get("active", True):
+            continue
+        cached = (db.get_cache(f"{key}|{city.lower()}") if key in LOCATION_SHOPS
+                  else db.get_cache(key))
+        if cached:
+            items.extend(cached[0])
+    return items
+
+
+def _is_deal(it: dict, mn: float, mx: float) -> bool:
+    if it.get("in_stock") is False:
+        return False
+    price = it.get("price")
+    return isinstance(price, (int, float)) and price > 0 and mn <= price <= mx
+
+
+def evaluate_and_notify() -> None:
+    for w in db.all_watches():
+        sub = w.get("push_sub")
+        if not sub:
+            continue
+        mn = w.get("min_price") or 0
+        mx = w.get("max_price") or 10 ** 9
+        last = dict(w.get("last_notified") or {})
+        changed = False
+        for it in results_for(w["city"]):
+            if not _is_deal(it, mn, mx):
+                continue
+            key = f"{it.get('shop')}|{it.get('title')}"
+            prev = last.get(key)
+            price = it["price"]
+            if prev is None or price < prev:
+                last[key] = price
+                changed = True
+                push.send_push(sub, {
+                    "title": f"💶 {it.get('shop')} — {price:.2f} €",
+                    "body": it.get("title", "Midea PortaSplit"),
+                    "url": it.get("url", ""),
+                })
+        if changed:
+            db.update_watch(w["token"], last_notified=last)
+
+
+def distinct_cities() -> set[str]:
+    cities = {w["city"] for w in db.all_watches() if w.get("city")}
+    return cities or {CATALOG.get("location", "Leipzig")}
+
+
+def run_cycle() -> None:
+    cities = distinct_cities()
+    logger.info("Scrape cycle: %d city(ies), %d shops", len(cities), len(SHOPS))
+    try:
+        scrape_catalog(cities)
+        evaluate_and_notify()
+    except Exception:
+        logger.exception("scrape cycle failed")
