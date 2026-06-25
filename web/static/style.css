@@ -26,3 +26,16 @@ th{color:var(--muted);font-weight:600}
 .bar{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;gap:8px;flex-wrap:wrap}
 a{color:var(--accent);text-decoration:none}
 summary{cursor:pointer;font-weight:600}
+
+/* Deal popup */
+.modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.6);display:flex;
+  align-items:center;justify-content:center;padding:16px;z-index:50}
+.modal-overlay[hidden]{display:none}
+.modal{background:var(--card);border:2px solid var(--accent);border-radius:14px;
+  padding:20px;max-width:480px;width:100%;box-shadow:0 12px 40px rgba(0,0,0,.5);
+  animation:pop .25s ease}
+.modal h2{margin:.2rem 0 .6rem}
+.modal .deal{padding:8px 0;border-bottom:1px solid var(--line)}
+.modal .deal b{color:#4ade80}
+.modal button{margin-top:14px;width:100%}
+@keyframes pop{from{transform:scale(.9);opacity:0}to{transform:scale(1);opacity:1}}

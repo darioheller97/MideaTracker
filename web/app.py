@@ -105,6 +105,8 @@ def api_results(token: str):
     ts = db.latest_ts()
     return JSONResponse({
         "city": w["city"],
+        "min_price": w.get("min_price"),
+        "max_price": w.get("max_price"),
         "updated": ts,
         "updated_human": time.strftime("%d.%m.%Y %H:%M", time.localtime(ts)) if ts else "—",
         "results": _sorted_results(items),

@@ -48,6 +48,16 @@
     <p class="muted">Privater Link — als Lesezeichen speichern. Auf dem iPhone:
       „Zum Home-Bildschirm“ hinzufügen, damit Push funktioniert (iOS 16.4+).</p>
   </div>
+
+  <!-- Deal popup (shown + ping when a new available product appears) -->
+  <div id="dealModal" class="modal-overlay" hidden>
+    <div class="modal">
+      <h2>🔥 Neuer Treffer!</h2>
+      <div id="dealList"></div>
+      <button id="dealClose">Schließen</button>
+    </div>
+  </div>
+
   <script src="/static/app.js"></script>
 </body>
 </html>
