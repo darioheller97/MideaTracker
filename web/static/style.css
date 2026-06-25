@@ -22,6 +22,7 @@ button:hover{filter:brightness(1.08)}
 .muted{color:var(--muted);font-size:.85rem}
 table{width:100%;border-collapse:collapse;font-size:.9rem}
 th,td{text-align:left;padding:7px 8px;border-bottom:1px solid var(--line);vertical-align:top}
+td:nth-child(3),th:nth-child(3){white-space:nowrap;width:100px}
 th{color:var(--muted);font-weight:600}
 .bar{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px;gap:8px;flex-wrap:wrap}
 a{color:var(--accent);text-decoration:none}
