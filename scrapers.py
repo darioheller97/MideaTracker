@@ -16,7 +16,9 @@ import json
 import math
 import re
 import logging
+import sys
 import threading
+from pathlib import Path
 from typing import Any
 
 import requests
@@ -165,12 +167,14 @@ _BROWSER_LOCK = threading.Lock()
 
 
 def _launch_chromium(pw):
-    """Launch a Chromium-based browser using whatever is available on the PC:
-    Playwright's bundled Chromium, else system Edge (on every Windows PC),
-    else system Chrome. Returns a browser or None. The first working choice
-    is cached so we don't re-probe on every fetch."""
+    """Launch a Chromium-based browser using whatever is available:
+    Playwright's bundled Chromium → Windows Edge/Chrome channels →
+    Linux system Chromium paths (/usr/bin/chromium-browser, snap).
+    First working choice is cached so we don't re-probe on every fetch."""
     global _BROWSER_CHOICE
     args = ["--disable-blink-features=AutomationControlled"]
+    if sys.platform.startswith("linux"):
+        args.append("--no-sandbox")  # required when running as root
     with _BROWSER_LOCK:
         choice = _BROWSER_CHOICE
     if choice is False:
@@ -180,12 +184,18 @@ def _launch_chromium(pw):
             return pw.chromium.launch(headless=True, args=args, **choice)
         except Exception:
             pass  # cached choice stopped working — fall through to re-probe
-    for kw in ({}, {"channel": "msedge"}, {"channel": "chrome"}):
+    probes: list[dict] = [{}, {"channel": "msedge"}, {"channel": "chrome"}]
+    if sys.platform.startswith("linux"):
+        for path in ("/usr/bin/chromium-browser", "/usr/bin/chromium", "/snap/bin/chromium"):
+            if Path(path).exists():
+                probes.append({"executable_path": path})
+    for kw in probes:
         try:
             browser = pw.chromium.launch(headless=True, args=args, **kw)
             with _BROWSER_LOCK:
                 _BROWSER_CHOICE = kw
-            logger.info("Browser: %s", kw.get("channel", "bundled Chromium"))
+            label = kw.get("channel") or kw.get("executable_path") or "bundled Chromium"
+            logger.info("Browser: %s", label)
             return browser
         except Exception as e:
             logger.debug("launch %s failed: %s", kw or "bundled", e)

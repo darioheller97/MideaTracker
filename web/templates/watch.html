@@ -41,6 +41,11 @@
             {% if p.key in watch.products %}checked{% endif %}> {{ p.name }}</label>
           {% endfor %}
         </fieldset>
+        <label>Scan-Intervall (Minuten)
+          <input type="number" name="scan_interval_min" min="1" max="1440"
+            value="{{ scan_interval_min }}" style="width:120px">
+          <span class="muted" style="font-size:.8rem"> — wie oft der Server alle Shops prüft (für alle Nutzer)</span>
+        </label>
         <button type="submit">Speichern</button>
       </form>
     </details>

@@ -48,6 +48,10 @@ def init_db() -> None:
                 lon      REAL,
                 postcode TEXT
             );
+            CREATE TABLE IF NOT EXISTS settings (
+                key   TEXT PRIMARY KEY,
+                value TEXT
+            );
             """
         )
 
@@ -119,6 +123,23 @@ def latest_ts() -> float:
     with _LOCK, _conn() as c:
         row = c.execute("SELECT MAX(ts) AS t FROM cache").fetchone()
     return row["t"] or 0.0
+
+
+# ── global settings ──────────────────────────────────────────────────────────
+
+def get_setting(key: str, default=None):
+    with _LOCK, _conn() as c:
+        row = c.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
+    return row["value"] if row else default
+
+
+def set_setting(key: str, value) -> None:
+    with _LOCK, _conn() as c:
+        c.execute(
+            "INSERT INTO settings (key, value) VALUES (?,?) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            (key, str(value)),
+        )
 
 
 # ── geocode cache ────────────────────────────────────────────────────────────

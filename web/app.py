@@ -33,6 +33,15 @@ templates = Jinja2Templates(directory=HERE / "templates")
 
 # ── lifecycle ────────────────────────────────────────────────────────────────
 
+def _current_interval() -> int:
+    """Return the active scan interval (DB setting > env var > 20 min)."""
+    val = db.get_setting("scan_interval_min")
+    try:
+        return max(1, int(val)) if val is not None else SCAN_INTERVAL_MIN
+    except (TypeError, ValueError):
+        return SCAN_INTERVAL_MIN
+
+
 @app.on_event("startup")
 def _startup():
     db.init_db()
@@ -42,14 +51,15 @@ def _startup():
         return
     # First scrape in the background so startup isn't blocked.
     threading.Thread(target=svc.run_cycle, daemon=True).start()
+    interval = _current_interval()
     try:
         from apscheduler.schedulers.background import BackgroundScheduler
         sched = BackgroundScheduler(daemon=True)
-        sched.add_job(svc.run_cycle, "interval", minutes=SCAN_INTERVAL_MIN,
+        sched.add_job(svc.run_cycle, "interval", minutes=interval,
                       id="scrape", max_instances=1, coalesce=True)
         sched.start()
         app.state.scheduler = sched
-        logger.info("Scheduler started (every %d min)", SCAN_INTERVAL_MIN)
+        logger.info("Scheduler started (every %d min)", interval)
     except Exception:
         logger.exception("Could not start scheduler")
 
@@ -91,6 +101,7 @@ def watch_page(request: Request, token: str):
     return templates.TemplateResponse(request, "watch.html", {
         "watch": w, "products": svc.PRODUCTS,
         "app_server_key": push.application_server_key(),
+        "scan_interval_min": _current_interval(),
     })
 
 
@@ -115,12 +126,21 @@ def api_results(token: str):
 
 @app.post("/w/{token}/settings")
 def update_settings(token: str, city: str = Form(...), min_price: float = Form(0),
-                    max_price: float = Form(1500), products: list[str] = Form(default=[])):
+                    max_price: float = Form(1500), products: list[str] = Form(default=[]),
+                    scan_interval_min: int = Form(20)):
     if not db.get_watch(token):
         raise HTTPException(404)
     db.update_watch(token, city=city.strip() or "Leipzig", min_price=min_price,
                     max_price=max_price, products=products, last_notified={})
-    # Make sure the new city gets scraped soon.
+    interval = max(1, scan_interval_min)
+    db.set_setting("scan_interval_min", interval)
+    sched = getattr(app.state, "scheduler", None)
+    if sched:
+        try:
+            sched.reschedule_job("scrape", trigger="interval", minutes=interval)
+            logger.info("Scan interval updated to %d min", interval)
+        except Exception:
+            logger.exception("Failed to reschedule scrape job")
     threading.Thread(target=svc.run_cycle, daemon=True).start()
     return RedirectResponse(url=f"/w/{token}", status_code=303)
 
