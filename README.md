@@ -9,6 +9,8 @@ Verfügbar als **Web-App** (kein Install, läuft auf dem Handy) und als **Window
 
 ## 🌐 Web-App — jetzt live
 
+IST NOCH ETWAS BUGGY, WÜRDE DIE DESKTOP VERSION (siehe unten) VORERST EMPFEHLEN!
+
 **https://midea.icetea.me**
 
 - Öffne die Seite, gib deine Stadt und dein Budget ein → du erhältst einen **privaten Link** (kein Account nötig).
