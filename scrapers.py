@@ -30,11 +30,28 @@ HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
-        "Chrome/125.0.0.0 Safari/537.36"
+        "Chrome/131.0.0.0 Safari/537.36"
     ),
-    "Accept-Language": "de-DE,de;q=0.9,en;q=0.8",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "de-DE,de;q=0.9,en-US;q=0.8,en;q=0.7",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "sec-ch-ua": '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": '"Windows"',
+    "sec-fetch-dest": "document",
+    "sec-fetch-mode": "navigate",
+    "sec-fetch-site": "none",
+    "sec-fetch-user": "?1",
+    "upgrade-insecure-requests": "1",
 }
+
+# curl_cffi enables Chrome TLS fingerprint mimicry — bypasses some Cloudflare TLS checks.
+try:
+    from curl_cffi import requests as _cffi_requests
+    _CFFI_AVAILABLE = True
+    logger.debug("curl_cffi available — TLS fingerprint mimicry enabled")
+except ImportError:
+    _cffi_requests = None
+    _CFFI_AVAILABLE = False
 
 TIMEOUT = 20
 
@@ -47,6 +64,19 @@ _MIDEA_KW = ["midea", "portasplit", "klimaanlage", "mobile klimaanlage"]
 # ---------------------------------------------------------------------------
 
 def _fetch(url: str) -> str | None:
+    """HTTP GET with Chrome TLS fingerprint (curl_cffi) when available, else requests."""
+    if _CFFI_AVAILABLE:
+        try:
+            r = _cffi_requests.get(
+                url, impersonate="chrome131", headers=HEADERS, timeout=TIMEOUT,
+                allow_redirects=True,
+            )
+            if r.status_code == 200:
+                return r.text
+            logger.warning("%s → %d (curl_cffi)", url, r.status_code)
+            # Fall through to plain requests on non-200 too
+        except Exception as e:
+            logger.debug("curl_cffi failed for %s: %s — falling back", url, e)
     try:
         r = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
         if r.status_code == 200:
@@ -143,13 +173,77 @@ def _ensure_playwright_browser():
         return False
 
 
-# Full stealth payload (more convincing than just navigator.webdriver).
-_STEALTH_JS = (
-    'Object.defineProperty(navigator,"webdriver",{get:()=>undefined});'
-    'Object.defineProperty(navigator,"languages",{get:()=>["de-DE","de"]});'
-    'Object.defineProperty(navigator,"plugins",{get:()=>[1,2,3,4,5]});'
-    'window.chrome={runtime:{}};'
-)
+# Comprehensive stealth payload — covers the most common headless-detection vectors.
+_STEALTH_JS = """
+// 1. navigator.webdriver
+Object.defineProperty(navigator,'webdriver',{get:()=>undefined,configurable:true});
+
+// 2. Full chrome runtime (absence = detected)
+window.chrome={
+  app:{isInstalled:false},
+  runtime:{
+    connect:()=>{}, sendMessage:()=>{},
+    OnInstalledReason:{CHROME_UPDATE:'chrome_update',INSTALL:'install',UPDATE:'update'},
+    PlatformOs:{WIN:'win',MAC:'mac',LINUX:'linux'},
+    PlatformArch:{X86_32:'x86-32',X86_64:'x86-64',ARM:'arm',ARM64:'arm64'},
+  },
+  loadTimes:()=>({}),
+  csi:()=>({}),
+};
+
+// 3. Languages
+Object.defineProperty(navigator,'languages',{get:()=>['de-DE','de','en-US','en']});
+
+// 4. Plugins — real-looking PluginArray-like object
+(function(){
+  const makePlugin=(n,f,d)=>Object.assign(Object.create(Plugin.prototype),{name:n,filename:f,description:d,length:1});
+  const pl=[
+    makePlugin('PDF Viewer','internal-pdf-viewer','Portable Document Format'),
+    makePlugin('Chrome PDF Viewer','mhjfbmdgcfjbbpaeojofohoefgiehjai',''),
+    makePlugin('Chromium PDF Viewer','internal-pdf-viewer',''),
+    makePlugin('Microsoft Edge PDF Viewer','internal-pdf-viewer',''),
+    makePlugin('WebKit built-in PDF','internal-pdf-viewer',''),
+  ];
+  Object.defineProperty(pl,'__proto__',{value:PluginArray.prototype});
+  Object.defineProperty(navigator,'plugins',{get:()=>pl});
+})();
+
+// 5. Hardware concurrency + device memory
+Object.defineProperty(navigator,'hardwareConcurrency',{get:()=>8});
+try{Object.defineProperty(navigator,'deviceMemory',{get:()=>8});}catch(_){}
+
+// 6. Screen depth
+try{Object.defineProperty(screen,'colorDepth',{get:()=>24});}catch(_){}
+try{Object.defineProperty(screen,'pixelDepth',{get:()=>24});}catch(_){}
+
+// 7. Notification permission — headless returns 'denied'; real browser returns 'default'
+try{
+  if(window.Notification) Object.defineProperty(Notification,'permission',{get:()=>'default'});
+  if(window.Permissions){
+    const _q=window.Permissions.prototype.query;
+    window.Permissions.prototype.query=function(p){
+      if(p&&p.name==='notifications')return Promise.resolve({state:'default',onchange:null});
+      return _q.call(this,p);
+    };
+  }
+}catch(_){}
+
+// 8. Remove cdc_ / $cdc_ driver artifacts left by Playwright/ChromeDriver
+(function(){
+  const keys=Object.keys(window).filter(k=>k.startsWith('cdc_')||k.startsWith('$cdc_'));
+  keys.forEach(k=>{try{delete window[k];}catch(_){}});
+})();
+
+// 9. Pass the iframe contentWindow.navigator test
+try{
+  Object.defineProperty(HTMLIFrameElement.prototype,'contentWindow',{
+    get:function(){const w=Object.getOwnPropertyDescriptor(HTMLIFrameElement.prototype,'contentWindow');
+    const r=w&&w.get?w.get.call(this):null;
+    if(r)try{Object.defineProperty(r.navigator,'webdriver',{get:()=>undefined});}catch(_){}
+    return r;}
+  });
+}catch(_){}
+"""
 # Substrings that indicate a bot-challenge / interstitial rather than real content.
 _CHALLENGE_MARKERS = (
     "Sicherheitsüberprüfung", "kein Bot", "Just a moment",
@@ -172,7 +266,15 @@ def _launch_chromium(pw):
     Linux system Chromium paths (/usr/bin/chromium-browser, snap).
     First working choice is cached so we don't re-probe on every fetch."""
     global _BROWSER_CHOICE
-    args = ["--disable-blink-features=AutomationControlled"]
+    args = [
+        "--disable-blink-features=AutomationControlled",
+        "--disable-infobars",
+        "--disable-dev-shm-usage",
+        "--disable-extensions-except=",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--window-size=1366,768",
+    ]
     if sys.platform.startswith("linux"):
         args.append("--no-sandbox")  # required when running as root
     with _BROWSER_LOCK:
@@ -225,10 +327,19 @@ def _browser_fetch(
             browser = _launch_chromium(pw)
             if browser is None:
                 return None, None
+            import random
             context = browser.new_context(
                 locale="de-DE",
-                viewport={"width": 1366, "height": 1000},
+                viewport={"width": 1366 + random.randint(0, 100),
+                          "height": 768 + random.randint(0, 100)},
                 user_agent=HEADERS["User-Agent"],
+                extra_http_headers={
+                    "sec-ch-ua": HEADERS["sec-ch-ua"],
+                    "sec-ch-ua-mobile": HEADERS["sec-ch-ua-mobile"],
+                    "sec-ch-ua-platform": HEADERS["sec-ch-ua-platform"],
+                },
+                color_scheme="light",
+                timezone_id="Europe/Berlin",
             )
             context.add_init_script(_STEALTH_JS)
             if cookies:
@@ -243,7 +354,7 @@ def _browser_fetch(
                 logger.debug("goto soft-failed for %s: %s", url, e)
             body_text, html = "", ""
             for _ in range(max(1, wait_polls)):
-                page.wait_for_timeout(2000)
+                page.wait_for_timeout(1800 + random.randint(0, 600))
                 try:
                     body_text = page.inner_text("body")
                     html = page.content()
@@ -597,8 +708,96 @@ def _scrape_amazon_search(url: str) -> list[dict[str, Any]]:
 # MediaMarkt (Playwright + JSON-LD)
 # ---------------------------------------------------------------------------
 
+def _mediamarkt_from_next_data(html: str, base_url: str) -> list[dict] | None:
+    """Extract products from MediaMarkt's embedded __NEXT_DATA__ JSON (no browser needed)."""
+    m = re.search(r'<script id="__NEXT_DATA__"[^>]*>(.*?)</script>', html, re.S)
+    if not m:
+        return None
+    try:
+        nd = json.loads(m.group(1))
+    except Exception:
+        return None
+
+    # Walk the tree searching for a list of product dicts with a 'name'/'price' shape.
+    def _find_products(obj, depth=0):
+        if depth > 8:
+            return []
+        if isinstance(obj, list) and obj:
+            first = obj[0]
+            if isinstance(first, dict) and ("name" in first or "title" in first):
+                return obj
+            found = []
+            for item in obj[:3]:
+                found = _find_products(item, depth + 1)
+                if found:
+                    return found
+        if isinstance(obj, dict):
+            # Priority keys used by MediaMarkt/Saturn Next.js data
+            for key in ("products", "items", "results", "hits", "searchResult"):
+                if key in obj:
+                    r = _find_products(obj[key], depth + 1)
+                    if r:
+                        return r
+            for v in obj.values():
+                r = _find_products(v, depth + 1)
+                if r:
+                    return r
+        return []
+
+    raw = _find_products(nd)
+    if not raw:
+        return None
+
+    results = []
+    for p in raw:
+        if not isinstance(p, dict):
+            continue
+        name = (p.get("name") or p.get("title") or "").strip()
+        if not name or not _is_midea_product(name):
+            continue
+        # Price: nested {price: {price: 999}} or flat {price: 999}
+        price_obj = p.get("price") or {}
+        if isinstance(price_obj, dict):
+            raw_price = price_obj.get("price") or price_obj.get("value") or price_obj.get("formattedValue")
+        else:
+            raw_price = price_obj
+        price = None
+        try:
+            price = round(float(str(raw_price).replace(",", ".")), 2) if raw_price else None
+        except (TypeError, ValueError):
+            pass
+
+        # Availability
+        avail_obj = p.get("availability") or p.get("stock") or p.get("delivery") or {}
+        avail_str = ""
+        if isinstance(avail_obj, dict):
+            avail_str = str(avail_obj.get("deliveryType") or avail_obj.get("status") or avail_obj.get("label") or "")
+        elif isinstance(avail_obj, str):
+            avail_str = avail_obj
+        in_stock = _stock_from_text(avail_str) if avail_str else None
+
+        # URL
+        rel = p.get("url") or p.get("pdpUrl") or p.get("productUrl") or ""
+        full_url = _clean_url(base_url, rel) if rel else base_url
+
+        results.append({
+            "shop": "MediaMarkt", "title": name, "price": price,
+            "currency": "€", "url": full_url, "in_stock": in_stock, "error": None,
+        })
+    return results if results else None
+
+
 def scrape_mediamarkt(url: str, **kwargs) -> list[dict[str, Any]]:
-    # Use Playwright for full DOM extraction with availability
+    # Fast path: try curl_cffi + __NEXT_DATA__ (no browser, bypasses some Cloudflare).
+    html_fast = _fetch(url)
+    if html_fast:
+        nd_results = _mediamarkt_from_next_data(html_fast, url)
+        if nd_results:
+            logger.info("MediaMarkt: __NEXT_DATA__ extraction succeeded (%d products)", len(nd_results))
+            return nd_results
+        logger.debug("MediaMarkt: __NEXT_DATA__ not found / no Midea products — trying Playwright")
+
+    # Full Playwright path with availability extraction.
     try:
         from playwright.sync_api import sync_playwright
 

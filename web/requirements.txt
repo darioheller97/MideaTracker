@@ -12,3 +12,4 @@ requests
 lxml
 cssselect
 playwright
+curl_cffi
