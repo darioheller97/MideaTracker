@@ -477,6 +477,40 @@ DEFAULT_RADIUS_KM = 100
 MAX_LOCAL_MARKETS = 8
 
 
+def _fast_scrape(url: str, shop: str) -> list[dict[str, Any]] | None:
+    """Try curl_cffi fetch + structured-data extraction without launching a browser.
+
+    Returns a result list on success, None if the page was blocked/unreadable so
+    the caller can fall back to Playwright.
+    """
+    html = _fetch(url)
+    if not html or len(html) < 500:
+        return None
+    if any(c in html for c in ("Just a moment", "Cloudflare", "Enable JavaScript",
+                                "Sicherheitsüberprüfung", "kein Bot")):
+        return None
+    price = _structured_price(html, None)
+    if not price:
+        # Try a plain price regex on the raw HTML as last resort
+        m = re.search(r'"price"\s*:\s*"?([\d]+[.,]\d{2})"?', html)
+        if m:
+            price = _price_from_text(m.group(1))
+    if not price:
+        return None   # no price = page didn't render useful content
+    try:
+        from lxml.html import fromstring as _lx
+        body_text = _lx(html).text_content()
+    except Exception:
+        body_text = re.sub(r"<[^>]+>", " ", html)
+    stock = _stock_from_text(body_text)
+    tm = re.search(r"<title>(.*?)</title>", html, re.S | re.I)
+    title = re.sub(r"\s+", " ", tm.group(1)).strip()[:120] if tm else f"Midea PortaSplit ({shop})"
+    if not _is_midea_product(title):
+        title = f"Midea PortaSplit ({shop})"
+    return [{"shop": shop, "title": title, "price": price, "currency": "€",
+             "url": url, "in_stock": stock, "error": None}]
+
+
 def _generic_browser_scrape(url: str, shop: str, **kwargs) -> list[dict[str, Any]]:
     """Render a product page with the strong stealth browser and extract
     price + stock. Used for shops without a clean API (Euronics, Cyberport, …)."""
@@ -1205,48 +1239,92 @@ def scrape_euronics(url: str, **kwargs) -> list[dict[str, Any]]:
 # Hornbach (blocked)
 # ---------------------------------------------------------------------------
 
+def _hornbach_article_id(url: str) -> str | None:
+    """Extract numeric article ID from Hornbach product URL."""
+    m = re.search(r"/(\d{6,10})/?$", url)
+    return m.group(1) if m else None
+
+
 def scrape_hornbach(url: str, **kwargs) -> list[dict[str, Any]]:
-    """Hornbach renders fine with the stealth browser. It shows a price even when
-    sold out, so we gate on real availability: delivery ("Bequem liefern lassen"
-    without "NICHT ONLINE BESTELLBAR") and the nearest market's reservation status.
-    The market is geo-assigned by the server to the machine's location."""
-    body, html = _browser_fetch(url)
+    """Try curl_cffi fast path first (JSON-LD), then stealth browser fallback."""
+    # --- Fast path: curl_cffi + JSON-LD ---
+    fast = _fast_scrape(url, "Hornbach")
+    if fast and fast[0].get("price"):
+        return fast
+
+    # --- Try Hornbach's internal article JSON API ---
+    art_id = _hornbach_article_id(url)
+    if art_id:
+        for api_url in (
+            f"https://www.hornbach.de/api/article/v1/{art_id}",
+            f"https://www.hornbach.de/data/article/v2/{art_id}",
+        ):
+            try:
+                api_html = _fetch(api_url)
+                if api_html and api_html.strip().startswith("{"):
+                    data = json.loads(api_html)
+                    price_raw = (data.get("price") or data.get("retailPrice")
+                                 or data.get("grossPrice") or data.get("salesPrice"))
+                    if price_raw:
+                        price = _price_from_text(str(price_raw))
+                        avail = str(data.get("availabilityStatus") or data.get("availability") or "")
+                        in_stock: bool | None = (
+                            True if any(k in avail.lower() for k in ("available", "verfügbar", "lieferbar"))
+                            else (False if any(k in avail.lower() for k in ("unavail", "nicht"))
+                                  else None)
+                        )
+                        if price:
+                            return [{"shop": "Hornbach", "title": "Midea PortaSplit — Lieferung",
+                                     "price": price, "currency": "€", "url": url,
+                                     "in_stock": in_stock, "error": None}]
+            except Exception:
+                pass
+
+    # --- Browser fallback with full stealth ---
+    body, html = _browser_fetch(url, wait_polls=12)
     if not body or len(body) < 400 or any(c in body for c in _CHALLENGE_MARKERS):
         return [_error("Hornbach", "Hornbach blockiert / nicht erreichbar", url)]
 
     U = body.upper()
-    # The buybox must have actually rendered, otherwise we can't judge availability.
-    buybox_rendered = "BEQUEM LIEFERN LASSEN" in U or "RESERVIER" in U
-    if not buybox_rendered:
-        return [_error("Hornbach", "Hornbach nicht vollständig geladen / blockiert", url)]
-
     price = _structured_price(html, body)
     if price is None:
-        m = re.search(r"Preis\s*[—–-]\s*([\d.]+,\d{2})\s*€", body)
-        if m:
-            price = _price_from_text(m.group(1))
+        m2 = re.search(r"Preis\s*[—–-]\s*([\d.]+,\d{2})\s*€", body)
+        if m2:
+            price = _price_from_text(m2.group(1))
 
+    # Buybox check — prefer explicit signals; fall back to generic price+stock text
+    buybox_rendered = "BEQUEM LIEFERN LASSEN" in U or "RESERVIER" in U
     results: list[dict[str, Any]] = []
-    if "BEQUEM LIEFERN LASSEN" in U and "NICHT ONLINE BESTELLBAR" not in U:
+
+    if buybox_rendered:
+        if "BEQUEM LIEFERN LASSEN" in U and "NICHT ONLINE BESTELLBAR" not in U:
+            results.append({
+                "shop": "Hornbach", "title": "Midea PortaSplit — Lieferung",
+                "price": price, "currency": "€", "url": url,
+                "in_stock": True, "delivery": "📦 Lieferung möglich", "error": None,
+            })
+        mk = re.search(r"HORNBACH\s+([A-ZÄÖÜ][\wäöüß .\-]{2,28}?)\s+Z\.ZT\.\s+(?:NICHT\s+)?RESERVIER", body)
+        if not mk:
+            mk = re.search(r"HORNBACH\s+([A-ZÄÖÜ][\wäöüß .\-]{2,28}?)\s+RESERVIER", body)
+        if mk:
+            market_name = mk.group(1).strip()
+            pickup_unavail = ("NICHT RESERVIERBAR" in U) or ("NICHT IM MARKT" in U)
+            results.append({
+                "shop": "Hornbach", "title": f"Midea PortaSplit — {market_name}",
+                "price": price, "currency": "€", "url": url,
+                "in_stock": (not pickup_unavail), "delivery": "🏪 Abholung", "error": None,
+            })
+    elif price:
+        # Page rendered enough to show a price but buybox didn't load — still report
+        stock = _stock_from_text(body)
         results.append({
-            "shop": "Hornbach", "title": "Midea PortaSplit — Lieferung",
+            "shop": "Hornbach", "title": "Midea PortaSplit",
             "price": price, "currency": "€", "url": url,
-            "in_stock": True, "delivery": "📦 Lieferung möglich", "error": None,
+            "in_stock": stock, "error": None,
         })
-    # Market name sits right before the reservation status line.
-    mk = re.search(r"HORNBACH\s+([A-ZÄÖÜ][\wäöüß .\-]{2,28}?)\s+Z\.ZT\.\s+(?:NICHT\s+)?RESERVIER", body)
-    if not mk:
-        mk = re.search(r"HORNBACH\s+([A-ZÄÖÜ][\wäöüß .\-]{2,28}?)\s+RESERVIER", body)
-    if mk:  # only emit a pickup row when we actually found the market block
-        market_name = mk.group(1).strip()
-        pickup_unavail = ("NICHT RESERVIERBAR" in U) or ("NICHT IM MARKT" in U)
-        results.append({
-            "shop": "Hornbach", "title": f"Midea PortaSplit — {market_name}",
-            "price": price, "currency": "€", "url": url,
-            "in_stock": (not pickup_unavail), "delivery": "🏪 Abholung", "error": None,
-        })
+
     if not results:
-        results.append(_error("Hornbach", "Hornbach: Markt-/Lieferstatus nicht lesbar", url))
+        results.append(_error("Hornbach", "Hornbach: Seite nicht vollständig geladen", url))
     return results
 
 
@@ -1255,6 +1333,9 @@ def scrape_hornbach(url: str, **kwargs) -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 def scrape_joybuy(url: str, **kwargs) -> list[dict[str, Any]]:
+    fast = _fast_scrape(url, "Joybuy")
+    if fast and fast[0].get("price"):
+        return fast
     return _generic_browser_scrape(url, "Joybuy", **kwargs)
 
 
@@ -1315,51 +1396,29 @@ def scrape_alternate(url: str, **kwargs) -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 def scrape_expert(url: str, **kwargs) -> list[dict[str, Any]]:
-    try:
-        from playwright.sync_api import sync_playwright
+    # Fast path: curl_cffi TLS-mimicry + JSON-LD
+    fast = _fast_scrape(url, "Expert")
+    if fast and fast[0].get("price"):
+        return fast
 
-        with sync_playwright() as pw:
-            browser = _launch_chromium(pw)
-            if browser is None:
-                raise RuntimeError("kein Browser (Chromium/Edge/Chrome) verfügbar")
-            context = browser.new_context(locale="de-DE", viewport={"width": 1920, "height": 1080})
-            context.add_init_script('Object.defineProperty(navigator, "webdriver", {get: () => undefined});')
-            page = context.new_page()
-            page.goto(url, timeout=30000, wait_until="domcontentloaded")
-            page.wait_for_timeout(8000)
+    # Browser fallback: full stealth via _browser_fetch
+    body, html = _browser_fetch(url, wait_polls=12)
+    if not body or len(body) < 400 or any(c in body for c in _CHALLENGE_MARKERS):
+        return [_error("Expert", "Expert blockiert Anfragen", url)]
 
-            title = page.title()
-            body = page.inner_text("body")
+    price = _structured_price(html, body)
+    if not price:
+        m = re.search(r"(\d[\d\.,]*\d{2})\s*[€€]", body)
+        if m:
+            price = _price_from_text(m.group(1))
+    if not price:
+        return [_error("Expert", "Expert: kein Preis gefunden", url)]
 
-            price = None
-            price_match = re.search(r"(\d[\d\.,]*\d{2})\s*[€€]", title)
-            if price_match:
-                price = _price_from_text(price_match.group(1))
-            if not price:
-                price_match = re.search(r"(\d[\d\.,]*\d{2})\s*[€€]", body)
-                if price_match:
-                    price = _price_from_text(price_match.group(1))
-
-            in_stock = "lieferbar" in body.lower() or "auf lager" in body.lower()
-            no_stock = "nicht lieferbar" in body.lower() or "ausverkauft" in body.lower()
-
-            browser.close()
-
-        if price:
-            return [{
-                "shop": "Expert",
-                "title": title.strip(),
-                "price": price,
-                "currency": "€",
-                "url": url,
-                "in_stock": True if in_stock else (False if no_stock else None),
-                "error": None,
-            }]
-    except Exception as e:
-        logger.warning("Expert scrape failed: %s", e)
-
-    return [_error("Expert",
-        "Expert blockiert Anfragen. Bitte im Browser öffnen.", url)]
+    stock = _stock_from_text(body)
+    tm = re.search(r"<title>(.*?)</title>", html, re.S | re.I)
+    title = re.sub(r"\s+", " ", tm.group(1)).strip()[:120] if tm else "Midea PortaSplit (Expert)"
+    return [{"shop": "Expert", "title": title, "price": price, "currency": "€",
+             "url": url, "in_stock": stock, "error": None}]
 
 
 # ---------------------------------------------------------------------------
