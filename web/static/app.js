@@ -61,7 +61,10 @@ async function loadResults() {
   try {
     const r = await fetch(`/api/results?token=${token}`);
     const d = await r.json();
-    document.getElementById("updated").textContent = `Stand: ${d.updated_human} · ${d.city}`;
+    const tsLabel = d.updated
+      ? new Date(d.updated * 1000).toLocaleString("de-DE", {day:"2-digit",month:"2-digit",year:"numeric",hour:"2-digit",minute:"2-digit"})
+      : "—";
+    document.getElementById("updated").textContent = `Stand: ${tsLabel} · ${d.city}`;
     const min = (d.min_price == null) ? 0 : d.min_price;
     const max = (d.max_price == null) ? Infinity : d.max_price;
 
