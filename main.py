@@ -2,11 +2,14 @@
 
 import json
 import logging
+import os
 import re
 import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+from version import __version__
 
 from PyQt5.QtCore import QTimer, Qt, QThread, pyqtSignal, QUrl
 from PyQt5.QtGui import QColor, QFont, QIcon, QPainter, QPixmap, QDesktopServices
@@ -18,6 +21,8 @@ from PyQt5.QtWidgets import (
     QLabel,
     QMainWindow,
     QMenu,
+    QMessageBox,
+    QProgressDialog,
     QPushButton,
     QStatusBar,
     QSystemTrayIcon,
@@ -46,6 +51,72 @@ if sys.platform == "win32":
         _orig_popen_init(self, *args, **kwargs)
 
     _subprocess.Popen.__init__ = _popen_no_window
+
+
+GITHUB_REPO = "darioheller97/MideaTracker"
+
+
+def _version_gt(a: str, b: str) -> bool:
+    try:
+        return tuple(int(x) for x in a.split(".")) > tuple(int(x) for x in b.split("."))
+    except Exception:
+        return False
+
+
+class UpdateChecker(QThread):
+    """Silently checks GitHub for a newer release on startup."""
+    update_found = pyqtSignal(str, str)  # (latest_version, download_url)
+
+    def run(self):
+        if not getattr(sys, "frozen", False):
+            return  # skip in dev / source mode
+        try:
+            import requests as req
+            r = req.get(
+                f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest",
+                headers={"Accept": "application/vnd.github.v3+json"},
+                timeout=10,
+            )
+            data = r.json()
+            latest = data.get("tag_name", "").lstrip("v")
+            if latest and _version_gt(latest, __version__):
+                url = next(
+                    (a["browser_download_url"] for a in data.get("assets", [])
+                     if a["name"].endswith(".exe")),
+                    None,
+                )
+                if url:
+                    self.update_found.emit(latest, url)
+        except Exception:
+            pass
+
+
+class UpdateDownloader(QThread):
+    """Downloads the new exe in the background and reports progress."""
+    progress = pyqtSignal(int, int)   # bytes_done, total_bytes
+    finished = pyqtSignal()
+    error = pyqtSignal(str)
+
+    def __init__(self, url: str, dest: Path):
+        super().__init__()
+        self._url = url
+        self._dest = dest
+
+    def run(self):
+        try:
+            import requests as req
+            with req.get(self._url, stream=True, timeout=120) as r:
+                total = int(r.headers.get("content-length", 0))
+                done = 0
+                with open(self._dest, "wb") as f:
+                    for chunk in r.iter_content(chunk_size=65536):
+                        if chunk:
+                            f.write(chunk)
+                            done += len(chunk)
+                            self.progress.emit(done, total)
+            self.finished.emit()
+        except Exception as e:
+            self.error.emit(str(e))
 
 
 class ScanWorker(QThread):
@@ -96,7 +167,7 @@ def _date_ts() -> str:
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("Midea PortaSplit Preis-Monitor")
+        self.setWindowTitle(f"Midea PortaSplit Preis-Monitor v{__version__}")
         self.setMinimumSize(750, 500)
 
         self._config: dict = cfgmod.load_config()
@@ -110,6 +181,11 @@ class MainWindow(QMainWindow):
         self._apply_config()
         self._update_status('Bereit — Klicke auf "Jetzt Scannen"')
         self._start_timer()
+
+        # Check for updates silently in background (only in packaged .exe)
+        self._update_checker = UpdateChecker()
+        self._update_checker.update_found.connect(self._on_update_found)
+        self._update_checker.start()
 
     # ------------------------------------------------------------------
     # UI
@@ -473,6 +549,74 @@ class MainWindow(QMainWindow):
 
         if changed:
             self._save_last_prices()
+
+    # ------------------------------------------------------------------
+    # Auto-update
+    # ------------------------------------------------------------------
+
+    def _on_update_found(self, version: str, url: str):
+        reply = QMessageBox.question(
+            self,
+            "Update verfügbar",
+            f"Version {version} ist verfügbar (aktuell: v{__version__}).\n\n"
+            "Jetzt herunterladen und installieren?\n"
+            "(Die App wird nach dem Download automatisch neu gestartet.)",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if reply == QMessageBox.Yes:
+            self._apply_update(url)
+
+    def _apply_update(self, url: str):
+        import tempfile
+        exe_path = Path(sys.executable)
+        update_path = exe_path.with_suffix(".update")
+
+        prog = QProgressDialog("Herunterladen…", "Abbrechen", 0, 100, self)
+        prog.setWindowTitle("Update wird installiert")
+        prog.setWindowModality(Qt.WindowModal)
+        prog.setMinimumWidth(380)
+        prog.setValue(0)
+        prog.show()
+
+        self._downloader = UpdateDownloader(url, update_path)
+
+        def on_progress(done: int, total: int):
+            if prog.wasCanceled():
+                self._downloader.terminate()
+                update_path.unlink(missing_ok=True)
+                return
+            if total > 0:
+                mb_done = done / 1024 / 1024
+                mb_total = total / 1024 / 1024
+                prog.setValue(int(done * 100 / total))
+                prog.setLabelText(f"Herunterladen… {mb_done:.1f} / {mb_total:.1f} MB")
+
+        def on_finished():
+            prog.close()
+            # Write a bat script; Windows can't replace a running exe directly.
+            bat_fd, bat_path = tempfile.mkstemp(suffix=".bat")
+            with os.fdopen(bat_fd, "w", encoding="utf-8") as f:
+                f.write(
+                    "@echo off\r\n"
+                    "timeout /t 2 /nobreak >nul\r\n"
+                    f'move /y "{update_path}" "{exe_path}"\r\n'
+                    f'start "" "{exe_path}"\r\n'
+                    'del "%~f0"\r\n'
+                )
+            import subprocess
+            subprocess.Popen(["cmd", "/c", bat_path], creationflags=0x08000000)
+            QApplication.quit()
+
+        def on_error(msg: str):
+            prog.close()
+            QMessageBox.critical(self, "Download fehlgeschlagen", msg)
+            update_path.unlink(missing_ok=True)
+
+        self._downloader.progress.connect(on_progress)
+        self._downloader.finished.connect(on_finished)
+        self._downloader.error.connect(on_error)
+        self._downloader.start()
 
     # ------------------------------------------------------------------
     # Settings

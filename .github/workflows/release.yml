@@ -1,7 +1,7 @@
 name: Build & Release
 
 # Build the Windows .exe and publish it as a GitHub Release.
-# Triggered by pushing a version tag (e.g. v1.0.0), or manually.
+# Triggered by pushing a version tag (e.g. v1.2.0), or manually.
 on:
   push:
     tags:
@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag (e.g. v1.0.0)"
+        description: "Release tag (e.g. v1.2.0)"
         required: true
         default: "v0.0.0"
 
@@ -29,6 +29,14 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
+      - name: Stamp version into version.py
+        shell: bash
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          VER="${TAG#v}"
+          echo "__version__ = \"$VER\"" > version.py
+          echo "Building version $VER"
+
       - name: Build .exe (PyInstaller)
         # No Chromium is bundled — the app uses the user's installed browser
         # (Playwright Chromium if present, otherwise Edge/Chrome).
@@ -36,6 +44,7 @@ jobs:
           pyinstaller --noconfirm --onefile --windowed
           --name MideaPortaSplitMonitor
           --add-data "config.json;."
+          --add-data "version.py;."
           --collect-all playwright
           main.py
 
@@ -50,4 +59,7 @@ jobs:
             **Download `MideaPortaSplitMonitor.exe`** unten und doppelklicken.
             Läuft auf jedem Windows-PC; für JS-Shops wird ein installierter
             Browser genutzt (Edge ist überall vorhanden) — kein Extra-Download.
+
+            Ab dieser Version prüft die App beim Start automatisch auf Updates
+            und installiert sie mit einem Klick.
           files: dist/MideaPortaSplitMonitor.exe
