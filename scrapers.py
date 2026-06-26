@@ -341,8 +341,12 @@ def _stock_from_text(body: str) -> bool | None:
     """Best-effort availability from rendered page text."""
     b = (body or "").lower()
     neg = ["nicht lieferbar", "nicht verfügbar", "ausverkauft", "derzeit nicht",
-           "nicht auf lager", "vergriffen", "nicht online bestellbar", "nicht reservierbar"]
-    pos = ["in den warenkorb", "sofort lieferbar", "auf lager", "lieferbar",
+           "nicht auf lager", "vergriffen", "nicht online bestellbar", "nicht reservierbar",
+           "lieferbar ab", "nicht vorrätig", "z.zt. nicht", "vorbestellbar",
+           "derzeit ausverkauft", "aktuell nicht"]
+    # "lieferbar" alone is too broad — it matches "lieferbar ab August" and footer/nav
+    # text for other products.  Only count unambiguous positive signals.
+    pos = ["in den warenkorb", "sofort lieferbar", "auf lager",
            "sofort verfügbar", "jetzt kaufen"]
     if any(n in b for n in neg):
         return False
@@ -952,9 +956,14 @@ def scrape_prosatech(url: str, **kwargs) -> list[dict[str, Any]]:
             if price_match:
                 price = _price_from_text(price_match.group(1))
 
-        in_stock = "lieferbar" in body.lower() or "auf lager" in body.lower() or "sofort" in body.lower()
-        no_stock = "nicht lieferbar" in body.lower() or "ausverkauft" in body.lower()
-        
+        b = body.lower()
+        # "lieferbar" alone is too broad ("lieferbar ab August" = not available now).
+        in_stock = ("sofort lieferbar" in b or "auf lager" in b
+                    or "sofort verfügbar" in b or "in den warenkorb" in b)
+        no_stock = ("nicht lieferbar" in b or "ausverkauft" in b
+                    or "nicht verfügbar" in b or "lieferbar ab" in b
+                    or "nicht auf lager" in b or "vorbestellbar" in b)
+
         # Extract delivery time
         delivery = ""
         dm = re.search(r"lieferzeit[:\s]*([^\n]+)", body, re.IGNORECASE)
@@ -967,7 +976,8 @@ def scrape_prosatech(url: str, **kwargs) -> list[dict[str, Any]]:
             "price": price,
             "currency": "€",
             "url": url,
-            "in_stock": True if in_stock else (False if no_stock else None),
+            # no_stock always wins over in_stock (e.g. "lieferbar ab August")
+            "in_stock": False if no_stock else (True if in_stock else None),
             "delivery": delivery,
             "error": None,
         }]
