@@ -328,42 +328,48 @@ def _browser_fetch(
             if browser is None:
                 return None, None
             import random
-            context = browser.new_context(
-                locale="de-DE",
-                viewport={"width": 1366 + random.randint(0, 100),
-                          "height": 768 + random.randint(0, 100)},
-                user_agent=HEADERS["User-Agent"],
-                extra_http_headers={
-                    "sec-ch-ua": HEADERS["sec-ch-ua"],
-                    "sec-ch-ua-mobile": HEADERS["sec-ch-ua-mobile"],
-                    "sec-ch-ua-platform": HEADERS["sec-ch-ua-platform"],
-                },
-                color_scheme="light",
-                timezone_id="Europe/Berlin",
-            )
-            context.add_init_script(_STEALTH_JS)
-            if cookies:
-                try:
-                    context.add_cookies(cookies)
-                except Exception as e:
-                    logger.debug("add_cookies failed: %s", e)
-            page = context.new_page()
             try:
-                page.goto(url, timeout=timeout_ms, wait_until="domcontentloaded")
-            except Exception as e:
-                logger.debug("goto soft-failed for %s: %s", url, e)
-            body_text, html = "", ""
-            for _ in range(max(1, wait_polls)):
-                page.wait_for_timeout(1800 + random.randint(0, 600))
+                context = browser.new_context(
+                    locale="de-DE",
+                    viewport={"width": 1366 + random.randint(0, 100),
+                              "height": 768 + random.randint(0, 100)},
+                    user_agent=HEADERS["User-Agent"],
+                    extra_http_headers={
+                        "sec-ch-ua": HEADERS["sec-ch-ua"],
+                        "sec-ch-ua-mobile": HEADERS["sec-ch-ua-mobile"],
+                        "sec-ch-ua-platform": HEADERS["sec-ch-ua-platform"],
+                    },
+                    color_scheme="light",
+                    timezone_id="Europe/Berlin",
+                )
+                context.add_init_script(_STEALTH_JS)
+                if cookies:
+                    try:
+                        context.add_cookies(cookies)
+                    except Exception as e:
+                        logger.debug("add_cookies failed: %s", e)
+                page = context.new_page()
                 try:
-                    body_text = page.inner_text("body")
-                    html = page.content()
+                    page.goto(url, timeout=timeout_ms, wait_until="domcontentloaded")
+                except Exception as e:
+                    logger.debug("goto soft-failed for %s: %s", url, e)
+                body_text, html = "", ""
+                for _ in range(max(1, wait_polls)):
+                    page.wait_for_timeout(1800 + random.randint(0, 600))
+                    try:
+                        body_text = page.inner_text("body")
+                        html = page.content()
+                    except Exception:
+                        body_text, html = "", ""
+                    if len(body_text) > 600 and not any(c in body_text for c in _CHALLENGE_MARKERS):
+                        break
+                return body_text or None, html or None
+            finally:
+                # Always close — prevents temp profile dirs accumulating in /tmp.
+                try:
+                    browser.close()
                 except Exception:
-                    body_text, html = "", ""
-                if len(body_text) > 600 and not any(c in body_text for c in _CHALLENGE_MARKERS):
-                    break
-            browser.close()
-            return body_text or None, html or None
+                    pass
     except Exception as e:
         logger.warning("Playwright fetch failed for %s: %s", url, e)
         return None, None

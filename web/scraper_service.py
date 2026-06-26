@@ -7,6 +7,7 @@ cached results and a Web Push is sent for new qualifying deals.
 
 import json
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -125,10 +126,28 @@ def scrape_city_now(city: str) -> None:
             logger.exception("scrape_city_now failed for %s/%s", key, city)
 
 
+def _cleanup_playwright_tmp() -> None:
+    """Remove stale Playwright browser profile dirs from /tmp (they accumulate on crash)."""
+    import glob, shutil, time
+    stale_after = 3600  # seconds
+    now = time.time()
+    for pattern in (
+        "/tmp/snap-private-tmp/snap.chromium/tmp/playwright_chromiumdev_profile-*",
+        "/tmp/playwright_chromiumdev_profile-*",
+    ):
+        for path in glob.glob(pattern):
+            try:
+                if now - os.path.getmtime(path) > stale_after:
+                    shutil.rmtree(path, ignore_errors=True)
+            except Exception:
+                pass
+
+
 def run_cycle() -> None:
     cities = distinct_cities()
     logger.info("Scrape cycle: %d city(ies), %d shops", len(cities), len(SHOPS))
     try:
+        _cleanup_playwright_tmp()
         scrape_catalog(cities)
         evaluate_and_notify()
     except Exception:
