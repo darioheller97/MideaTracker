@@ -62,22 +62,36 @@ async function loadResults() {
     const r = await fetch(`/api/results?token=${token}`);
     const d = await r.json();
     document.getElementById("updated").textContent = `Stand: ${d.updated_human} · ${d.city}`;
+    const min = (d.min_price == null) ? 0 : d.min_price;
+    const max = (d.max_price == null) ? Infinity : d.max_price;
+
     const tb = document.querySelector("#results tbody");
     tb.innerHTML = "";
     for (const it of d.results) {
-      const price = (it.price != null) ? it.price.toFixed(2) + " €" : "—";
+      const hasPrice = typeof it.price === "number";
+      const inBudget = hasPrice && it.price >= min && it.price <= max;
+      const overBudget = hasPrice && it.price > max;
+      const underBudget = hasPrice && it.price < min;
+
+      const priceText = hasPrice ? it.price.toFixed(2) + " €" : "—";
+      const budgetNote = overBudget ? " ↑" : (underBudget ? " ↓" : "");
       const status = it.in_stock === true ? "✅" : (it.in_stock === false ? "❌" : (it.error ? "⚠️" : "❓"));
       const link = it.url ? `<a href="${esc(it.url)}" target="_blank" rel="noopener">↗</a>` : "";
+
       const tr = document.createElement("tr");
+      if (it.in_stock === true && inBudget) tr.classList.add("in-budget");
+      else if (overBudget || underBudget) tr.classList.add("out-of-budget");
+
+      const priceTitle = overBudget ? `Über Budget (max ${max.toFixed(0)} €)`
+                       : underBudget ? `Unter Budget (min ${min.toFixed(0)} €)` : "";
       tr.innerHTML = `<td>${esc(it.shop || "")}</td><td>${esc(it.title || "")}</td>` +
-        `<td>${price}</td><td title="${esc(it.error || "")}">${status}</td><td>${link}</td>`;
+        `<td title="${priceTitle}">${priceText}<span class="budget-note">${budgetNote}</span></td>` +
+        `<td title="${esc(it.error || "")}">${status}</td><td>${link}</td>`;
       tb.appendChild(tr);
     }
     if (!d.results.length) tb.innerHTML = `<tr><td colspan="5" class="muted">Noch keine Daten — der erste Scan läuft…</td></tr>`;
 
     // Detect NEW available products within budget -> ping + popup.
-    const min = (d.min_price == null) ? 0 : d.min_price;
-    const max = (d.max_price == null) ? Infinity : d.max_price;
     const qualifying = d.results.filter(it =>
       it.in_stock === true && typeof it.price === "number" && it.price >= min && it.price <= max);
     const curKeys = new Set(qualifying.map(it => it.shop + "|" + it.title));

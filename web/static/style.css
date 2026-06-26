@@ -28,6 +28,13 @@ th{color:var(--muted);font-weight:600}
 a{color:var(--accent);text-decoration:none}
 summary{cursor:pointer;font-weight:600}
 
+/* Price budget row states */
+tr.in-budget td{background:rgba(16,185,129,.09)}
+tr.in-budget td:nth-child(3){color:#4ade80;font-weight:600}
+tr.out-of-budget{opacity:.45}
+tr.out-of-budget:hover{opacity:.75}
+.budget-note{font-size:.75rem;color:var(--muted);margin-left:2px}
+
 /* Deal popup */
 .modal-overlay{position:fixed;inset:0;background:rgba(0,0,0,.6);display:flex;
   align-items:center;justify-content:center;padding:16px;z-index:50}
