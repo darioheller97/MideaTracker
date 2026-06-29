@@ -14,6 +14,7 @@ Each scraper function takes a URL and returns a list of dicts:
 
 import json
 import math
+import os
 import re
 import logging
 import sys
@@ -59,18 +60,34 @@ TIMEOUT = 20
 _MIDEA_KW = ["midea", "portasplit", "klimaanlage", "mobile klimaanlage"]
 
 
+def _proxy() -> str | None:
+    """Optional outbound proxy for shops that block datacenter IPs.
+
+    Set SCRAPER_PROXY to route fetches through a residential IP — e.g. a reverse
+    SOCKS tunnel from a home machine: ``socks5://127.0.0.1:1080`` (also accepts
+    ``http://user:pass@host:port``). Inert (direct connection) when unset.
+    """
+    p = os.environ.get("SCRAPER_PROXY", "").strip()
+    return p or None
+
+
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
 def _fetch(url: str) -> str | None:
-    """HTTP GET with Chrome TLS fingerprint (curl_cffi) when available, else requests."""
+    """HTTP GET with Chrome TLS fingerprint (curl_cffi) when available, else requests.
+
+    Routes through SCRAPER_PROXY (a residential-IP tunnel) when set."""
+    proxy = _proxy()
+    proxies = {"http": proxy, "https": proxy} if proxy else None
     if _CFFI_AVAILABLE:
         try:
-            r = _cffi_requests.get(
-                url, impersonate="chrome131", headers=HEADERS, timeout=TIMEOUT,
-                allow_redirects=True,
-            )
+            kw = dict(impersonate="chrome131", headers=HEADERS, timeout=TIMEOUT,
+                      allow_redirects=True)
+            if proxies:
+                kw["proxies"] = proxies
+            r = _cffi_requests.get(url, **kw)
             if r.status_code == 200:
                 return r.text
             logger.warning("%s → %d (curl_cffi)", url, r.status_code)
@@ -78,7 +95,7 @@ def _fetch(url: str) -> str | None:
         except Exception as e:
             logger.debug("curl_cffi failed for %s: %s — falling back", url, e)
     try:
-        r = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
+        r = requests.get(url, headers=HEADERS, timeout=TIMEOUT, proxies=proxies)
         if r.status_code == 200:
             return r.text
         logger.warning("%s returned status %d", url, r.status_code)
@@ -277,13 +294,17 @@ def _launch_chromium(pw):
     ]
     if sys.platform.startswith("linux"):
         args.append("--no-sandbox")  # required when running as root
+    proxy = _proxy()
+    base_kw: dict = {"headless": True, "args": args}
+    if proxy:
+        base_kw["proxy"] = {"server": proxy}  # exit via residential-IP tunnel
     with _BROWSER_LOCK:
         choice = _BROWSER_CHOICE
     if choice is False:
         return None
     if isinstance(choice, dict):
         try:
-            return pw.chromium.launch(headless=True, args=args, **choice)
+            return pw.chromium.launch(**base_kw, **choice)
         except Exception:
             pass  # cached choice stopped working — fall through to re-probe
     probes: list[dict] = [{}, {"channel": "msedge"}, {"channel": "chrome"}]
@@ -293,7 +314,7 @@ def _launch_chromium(pw):
                 probes.append({"executable_path": path})
     for kw in probes:
         try:
-            browser = pw.chromium.launch(headless=True, args=args, **kw)
+            browser = pw.chromium.launch(**base_kw, **kw)
             with _BROWSER_LOCK:
                 _BROWSER_CHOICE = kw
             label = kw.get("channel") or kw.get("executable_path") or "bundled Chromium"

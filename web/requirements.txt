@@ -9,6 +9,7 @@ cryptography
 
 # Shared scraping engine (same as the desktop app)
 requests
+PySocks          # lets the requests fallback use SCRAPER_PROXY socks5:// tunnels
 lxml
 cssselect
 playwright
