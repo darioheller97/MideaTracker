@@ -11,6 +11,9 @@ __pycache__/
 # App runtime state
 last_prices.json
 
+# Web-app upload credentials (URL + shared ingest secret) — machine-specific
+upload.json
+
 # Web app runtime state & secrets
 web/midea.db
 web/.vapid.json

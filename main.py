@@ -35,6 +35,7 @@ from PyQt5.QtWidgets import (
 import config as cfgmod
 import notifications
 import scrapers
+import uploader
 from settings_dialog import SettingsDialog
 
 logger = logging.getLogger(__name__)
@@ -354,6 +355,18 @@ class MainWindow(QMainWindow):
         self._check_deals(self._scan_results)
         self._btn_scan.setEnabled(True)
         self._btn_scan.setText("🔍 Jetzt scannen")
+        self._upload_results_async()
+
+    def _upload_results_async(self):
+        """Share this residential-IP scan's online-shop results with the web app
+        (so phone users see the bot-protected shops). Fire-and-forget; no-op unless
+        upload.json / env vars are configured. Runs off the GUI thread."""
+        import copy
+        import threading
+        results = copy.deepcopy(self._scan_results)
+        shops_cfg = self._config.get("shops", {})
+        threading.Thread(target=uploader.upload_results,
+                         args=(results, shops_cfg), daemon=True).start()
 
     def _on_auto_scan(self):
         logger.info("Auto-scan triggered")
