@@ -1,6 +1,12 @@
 const token = document.body.dataset.token;
 const appKey = document.body.dataset.appkey;
 let seenAvailable = null;   // Set of "shop|title" keys currently qualifying (null = first load)
+let appVersion = null;      // build id we loaded with; if the server reports a newer one, prompt refresh
+
+function showUpdateBanner() {
+  const b = document.getElementById("updateBar");
+  if (b) b.hidden = false;
+}
 
 function esc(s) {
   return (s + "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
@@ -61,6 +67,12 @@ async function loadResults() {
   try {
     const r = await fetch(`/api/results?token=${token}`);
     const d = await r.json();
+    // Detect a new deployment: remember the first version we see; if the server
+    // later reports a different one, the page is running stale code → prompt refresh.
+    if (d.version) {
+      if (appVersion === null) appVersion = d.version;
+      else if (d.version !== appVersion) showUpdateBanner();
+    }
     const tsLabel = d.updated
       ? new Date(d.updated * 1000).toLocaleString("de-DE", {day:"2-digit",month:"2-digit",year:"numeric",hour:"2-digit",minute:"2-digit"})
       : "—";
@@ -134,6 +146,8 @@ async function enableNotifications() {
 
 document.getElementById("notifyBtn").onclick = enableNotifications;
 document.getElementById("refreshBtn").onclick = loadResults;
+const _upBtn = document.getElementById("updateReload");
+if (_upBtn) _upBtn.onclick = () => location.reload();
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
 loadResults();
 setInterval(loadResults, 60000);

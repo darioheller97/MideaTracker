@@ -7,6 +7,7 @@ Web Push notifications. Run with:  uvicorn web.app:app
 import logging
 import os
 import secrets
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -25,6 +26,25 @@ logger = logging.getLogger(__name__)
 
 HERE = Path(__file__).resolve().parent
 SCAN_INTERVAL_MIN = int(os.environ.get("SCAN_INTERVAL_MIN", "5"))
+
+
+def _app_version() -> str:
+    """A build id that changes only when the deployed code changes.
+
+    Uses the git commit hash so a redeploy (pull + restart) bumps it and open
+    clients get a 'refresh' prompt, while a plain restart (same code) does not.
+    """
+    try:
+        out = subprocess.run(["git", "rev-parse", "--short", "HEAD"], cwd=HERE.parent,
+                             capture_output=True, text=True, timeout=3)
+        if out.returncode == 0 and out.stdout.strip():
+            return out.stdout.strip()
+    except Exception:
+        pass
+    return "dev"
+
+
+APP_VERSION = _app_version()
 
 app = FastAPI(title="Midea Tracker")
 app.mount("/static", StaticFiles(directory=HERE / "static"), name="static")
@@ -121,6 +141,7 @@ def api_results(token: str):
         "updated": ts,
         "updated_human": time.strftime("%d.%m.%Y %H:%M", time.localtime(ts)) if ts else "—",
         "results": _sorted_results(items),
+        "version": APP_VERSION,
     })
 
 
