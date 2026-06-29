@@ -9,6 +9,7 @@ import json
 import logging
 import os
 import sys
+import time
 from pathlib import Path
 
 # Reuse the desktop scraping engine (no GUI deps).
@@ -27,6 +28,34 @@ PRODUCTS: list = CATALOG.get("products", [])
 PRICE_RANGE: dict = CATALOG.get("price_range", {"min": 0, "max": 5000})
 # OBI & Toom are location-aware (per city); everything else is delivery/online → shared.
 LOCATION_SHOPS = {"obi", "toom"}
+
+# A desktop app on a residential IP can upload results for the online shops (it gets
+# the bot-protected ones our datacenter IP can't). While such an upload is fresh, the
+# server stops scraping that shop itself so its blocked results don't overwrite the
+# good residential data. Local shops (OBI/Toom) are city-specific → never ingested.
+INGEST_FRESH_SEC = int(os.environ.get("INGEST_FRESH_SEC", "5400"))  # 90 min default
+
+
+def record_ingest(shops: list[str]) -> None:
+    """Stamp now() as the last-ingest time for each uploaded shop."""
+    try:
+        cur = json.loads(db.get_setting("ingest_ts") or "{}")
+    except Exception:
+        cur = {}
+    now = time.time()
+    for s in shops:
+        cur[s] = now
+    db.set_setting("ingest_ts", json.dumps(cur))
+
+
+def _fresh_ingested() -> set[str]:
+    """Shops whose last desktop upload is recent enough to trust over a server scrape."""
+    try:
+        cur = json.loads(db.get_setting("ingest_ts") or "{}")
+    except Exception:
+        return set()
+    now = time.time()
+    return {s for s, ts in cur.items() if now - ts < INGEST_FRESH_SEC}
 
 
 def _cfg(city: str | None) -> dict:
@@ -47,9 +76,16 @@ def _scrape_one(shop_key: str, city: str | None = None) -> list[dict]:
 
 
 def scrape_catalog(cities: set[str]) -> None:
-    """Scrape location-independent shops once + OBI/Toom per city; write to cache."""
+    """Scrape location-independent shops once + OBI/Toom per city; write to cache.
+
+    Online shops with a fresh desktop upload are skipped (the residential-IP data
+    is better than what our datacenter IP would get)."""
+    fresh = _fresh_ingested()
     for key, info in SHOPS.items():
         if not info.get("active", True) or key in LOCATION_SHOPS:
+            continue
+        if key in fresh:
+            logger.info("skip %s — using fresh desktop upload", key)
             continue
         db.set_cache(key, _scrape_one(key))
     for city in cities:

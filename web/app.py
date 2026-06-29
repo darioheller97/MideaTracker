@@ -26,6 +26,9 @@ logger = logging.getLogger(__name__)
 
 HERE = Path(__file__).resolve().parent
 SCAN_INTERVAL_MIN = int(os.environ.get("SCAN_INTERVAL_MIN", "5"))
+# Shared secret the desktop app sends to upload its residential-IP scrape results.
+# Unset → the /ingest endpoint is disabled.
+INGEST_SECRET = os.environ.get("INGEST_SECRET", "")
 
 
 def _app_version() -> str:
@@ -143,6 +146,37 @@ def api_results(token: str):
         "results": _sorted_results(items),
         "version": APP_VERSION,
     })
+
+
+@app.post("/ingest")
+async def ingest(request: Request):
+    """Receive residential-IP scrape results from the desktop app.
+
+    Body: {"shops": {"<shop_key>": [<result dict>, ...], ...}}. Only known,
+    non-location (online) shops are accepted — local shops (OBI/Toom) are
+    city-specific and must stay server-scraped per city."""
+    if not INGEST_SECRET:
+        raise HTTPException(503, "Ingest deaktiviert (kein INGEST_SECRET gesetzt)")
+    if not secrets.compare_digest(request.headers.get("X-Ingest-Token", ""), INGEST_SECRET):
+        raise HTTPException(403, "Ungültiges Ingest-Token")
+    try:
+        data = await request.json()
+    except Exception:
+        raise HTTPException(400, "Ungültiges JSON")
+    shops = data.get("shops") if isinstance(data, dict) else None
+    if not isinstance(shops, dict):
+        raise HTTPException(400, "Feld 'shops' (Objekt) erwartet")
+    accepted: list[str] = []
+    for key, results in shops.items():
+        if (key in svc.SHOPS and key not in svc.LOCATION_SHOPS
+                and isinstance(results, list)):
+            clean = [r for r in results if isinstance(r, dict)][:50]
+            db.set_cache(key, clean)
+            accepted.append(key)
+    if accepted:
+        svc.record_ingest(accepted)
+        logger.info("Ingest accepted shops: %s", ", ".join(accepted))
+    return {"ok": True, "accepted": accepted}
 
 
 @app.post("/w/{token}/settings")
