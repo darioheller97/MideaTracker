@@ -10,6 +10,7 @@ import json
 import sqlite3
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 DB_PATH = Path(__file__).resolve().parent / "midea.db"
@@ -22,8 +23,26 @@ def _conn() -> sqlite3.Connection:
     return c
 
 
+@contextmanager
+def _db():
+    """Open a connection, run a transaction, and ALWAYS close it.
+
+    NOTE: ``with conn:`` only commits/rolls back the transaction — it does *not*
+    close the connection. Relying on that alone leaks one file descriptor per call
+    and eventually exhausts the process fd limit (which took the site down once).
+    This wrapper guarantees the connection is closed in a ``finally``.
+    """
+    with _LOCK:
+        c = _conn()
+        try:
+            with c:  # commit on success, rollback on exception
+                yield c
+        finally:
+            c.close()
+
+
 def init_db() -> None:
-    with _LOCK, _conn() as c:
+    with _db() as c:
         c.executescript(
             """
             CREATE TABLE IF NOT EXISTS watches (
@@ -61,7 +80,7 @@ def init_db() -> None:
 def create_watch(token: str, city: str, min_price: float, max_price: float,
                   products: list[str]) -> None:
     now = time.time()
-    with _LOCK, _conn() as c:
+    with _db() as c:
         c.execute(
             "INSERT INTO watches (token, city, min_price, max_price, products, "
             "last_notified, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?)",
@@ -76,18 +95,18 @@ def update_watch(token: str, **fields) -> None:
     cols = ", ".join(f"{k}=?" for k in fields)
     vals = [json.dumps(v) if k in ("products", "push_sub", "last_notified") else v
             for k, v in fields.items()]
-    with _LOCK, _conn() as c:
+    with _db() as c:
         c.execute(f"UPDATE watches SET {cols} WHERE token=?", (*vals, token))
 
 
 def get_watch(token: str) -> dict | None:
-    with _LOCK, _conn() as c:
+    with _db() as c:
         row = c.execute("SELECT * FROM watches WHERE token=?", (token,)).fetchone()
     return _watch_row(row) if row else None
 
 
 def all_watches() -> list[dict]:
-    with _LOCK, _conn() as c:
+    with _db() as c:
         rows = c.execute("SELECT * FROM watches").fetchall()
     return [_watch_row(r) for r in rows]
 
@@ -103,7 +122,7 @@ def _watch_row(r: sqlite3.Row) -> dict:
 # ── shared scrape cache ──────────────────────────────────────────────────────
 
 def set_cache(key: str, payload: list[dict]) -> None:
-    with _LOCK, _conn() as c:
+    with _db() as c:
         c.execute(
             "INSERT INTO cache (key, payload, ts) VALUES (?,?,?) "
             "ON CONFLICT(key) DO UPDATE SET payload=excluded.payload, ts=excluded.ts",
@@ -112,7 +131,7 @@ def set_cache(key: str, payload: list[dict]) -> None:
 
 
 def get_cache(key: str) -> tuple[list[dict], float] | None:
-    with _LOCK, _conn() as c:
+    with _db() as c:
         row = c.execute("SELECT payload, ts FROM cache WHERE key=?", (key,)).fetchone()
     if not row:
         return None
@@ -120,7 +139,7 @@ def get_cache(key: str) -> tuple[list[dict], float] | None:
 
 
 def latest_ts() -> float:
-    with _LOCK, _conn() as c:
+    with _db() as c:
         row = c.execute("SELECT MAX(ts) AS t FROM cache").fetchone()
     return row["t"] or 0.0
 
@@ -128,13 +147,13 @@ def latest_ts() -> float:
 # ── global settings ──────────────────────────────────────────────────────────
 
 def get_setting(key: str, default=None):
-    with _LOCK, _conn() as c:
+    with _db() as c:
         row = c.execute("SELECT value FROM settings WHERE key=?", (key,)).fetchone()
     return row["value"] if row else default
 
 
 def set_setting(key: str, value) -> None:
-    with _LOCK, _conn() as c:
+    with _db() as c:
         c.execute(
             "INSERT INTO settings (key, value) VALUES (?,?) "
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -145,13 +164,13 @@ def set_setting(key: str, value) -> None:
 # ── geocode cache ────────────────────────────────────────────────────────────
 
 def get_geo(city: str) -> dict | None:
-    with _LOCK, _conn() as c:
+    with _db() as c:
         row = c.execute("SELECT * FROM geo WHERE city=?", (city.lower(),)).fetchone()
     return dict(row) if row else None
 
 
 def set_geo(city: str, lat: float, lon: float, postcode: str | None) -> None:
-    with _LOCK, _conn() as c:
+    with _db() as c:
         c.execute(
             "INSERT OR REPLACE INTO geo (city, lat, lon, postcode) VALUES (?,?,?,?)",
             (city.lower(), lat, lon, postcode),
