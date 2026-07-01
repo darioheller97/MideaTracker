@@ -76,7 +76,8 @@ async function loadResults() {
     const tsLabel = d.updated
       ? new Date(d.updated * 1000).toLocaleString("de-DE", {day:"2-digit",month:"2-digit",year:"numeric",hour:"2-digit",minute:"2-digit"})
       : "—";
-    document.getElementById("updated").textContent = `Stand: ${tsLabel} · ${d.city}`;
+    const staleTxt = d.stale ? ` <span class="stale">⚠️ veraltet</span>` : "";
+    document.getElementById("updated").innerHTML = `Stand: ${esc(tsLabel)} · ${esc(d.city || "")}${staleTxt}`;
     const min = (d.min_price == null) ? 0 : d.min_price;
     const max = (d.max_price == null) ? Infinity : d.max_price;
 
@@ -96,15 +97,23 @@ async function loadResults() {
       const tr = document.createElement("tr");
       if (it.in_stock === true && inBudget) tr.classList.add("in-budget");
       else if (overBudget || underBudget) tr.classList.add("out-of-budget");
+      if (it.error) tr.classList.add("blocked");
 
       const priceTitle = overBudget ? `Über Budget (max ${max.toFixed(0)} €)`
                        : underBudget ? `Unter Budget (min ${min.toFixed(0)} €)` : "";
-      tr.innerHTML = `<td>${esc(it.shop || "")}</td><td>${esc(it.title || "")}</td>` +
-        `<td title="${priceTitle}">${priceText}<span class="budget-note">${budgetNote}</span></td>` +
-        `<td title="${esc(it.error || "")}">${status}</td><td>${link}</td>`;
+      // data-label drives the mobile card layout (see style.css @media).
+      tr.innerHTML = `<td data-label="Shop">${esc(it.shop || "")}</td>` +
+        `<td data-label="Produkt">${esc(it.title || "")}</td>` +
+        `<td data-label="Preis" title="${priceTitle}">${priceText}<span class="budget-note">${budgetNote}</span></td>` +
+        `<td data-label="Status" title="${esc(it.error || "")}">${status}</td>` +
+        `<td data-label="Link">${link}</td>`;
       tb.appendChild(tr);
     }
-    if (!d.results.length) tb.innerHTML = `<tr><td colspan="5" class="muted">Noch keine Daten — der erste Scan läuft…</td></tr>`;
+    if (!d.results.length) {
+      tb.innerHTML = `<tr><td colspan="5" class="muted">Noch keine Daten — der erste Scan läuft…</td></tr>`;
+    } else if (d.results.every(it => it.error)) {
+      tb.innerHTML = `<tr><td colspan="5" class="muted">⚠️ Alle Shops sind aktuell blockiert oder nicht erreichbar — bitte später erneut versuchen.</td></tr>`;
+    }
 
     // Detect NEW available products within budget -> ping + popup.
     const qualifying = d.results.filter(it =>
@@ -118,6 +127,14 @@ async function loadResults() {
   } catch (e) {
     document.getElementById("updated").textContent = "Fehler beim Laden";
   }
+}
+
+// Refresh button with a spinning-icon busy state.
+async function refreshResults() {
+  const btn = document.getElementById("refreshBtn");
+  if (btn) { btn.disabled = true; btn.classList.add("spinning"); }
+  try { await loadResults(); }
+  finally { if (btn) { btn.disabled = false; btn.classList.remove("spinning"); } }
 }
 
 // ── Push ─────────────────────────────────────────────────────────────────
@@ -145,9 +162,25 @@ async function enableNotifications() {
 }
 
 document.getElementById("notifyBtn").onclick = enableNotifications;
-document.getElementById("refreshBtn").onclick = loadResults;
+document.getElementById("refreshBtn").onclick = refreshResults;
 const _upBtn = document.getElementById("updateReload");
 if (_upBtn) _upBtn.onclick = () => location.reload();
+
+const _delBtn = document.getElementById("deleteBtn");
+if (_delBtn) _delBtn.onclick = async () => {
+  if (!confirm("Diesen Watch wirklich löschen? Der Link wird ungültig und Benachrichtigungen werden gestoppt.")) return;
+  try {
+    if ("serviceWorker" in navigator) {
+      const reg = await navigator.serviceWorker.getRegistration();
+      const sub = reg && await reg.pushManager.getSubscription();
+      if (sub) await sub.unsubscribe();
+    }
+  } catch (e) { /* ignore unsubscribe errors */ }
+  // Native form submit follows the server's 303 redirect back to "/".
+  const f = document.createElement("form");
+  f.method = "POST"; f.action = `/w/${token}/delete`;
+  document.body.appendChild(f); f.submit();
+};
 if ("serviceWorker" in navigator) navigator.serviceWorker.register("/sw.js").catch(() => {});
 loadResults();
 setInterval(loadResults, 60000);

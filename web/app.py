@@ -137,6 +137,11 @@ def api_results(token: str):
         raise HTTPException(404, "Unbekannter Link")
     items = svc.results_for(w["city"])
     ts = db.latest_ts()
+    interval = _current_interval()
+    now = time.time()
+    # Data is "stale" if the last scan is older than 2× the scan interval.
+    stale = bool(ts) and (now - ts) > interval * 60 * 2
+    next_scan_est = int(max(0, (ts + interval * 60) - now)) if ts else None
     return JSONResponse({
         "city": w["city"],
         "min_price": w.get("min_price"),
@@ -145,6 +150,9 @@ def api_results(token: str):
         "updated_human": time.strftime("%d.%m.%Y %H:%M", time.localtime(ts)) if ts else "—",
         "results": _sorted_results(items),
         "version": APP_VERSION,
+        "interval_min": interval,
+        "stale": stale,
+        "next_scan_sec": next_scan_est,
     })
 
 
@@ -177,6 +185,14 @@ async def ingest(request: Request):
         svc.record_ingest(accepted)
         logger.info("Ingest accepted shops: %s", ", ".join(accepted))
     return {"ok": True, "accepted": accepted}
+
+
+@app.post("/w/{token}/delete")
+def delete_watch(token: str):
+    if not db.get_watch(token):
+        raise HTTPException(404, "Unbekannter Link")
+    db.delete_watch(token)
+    return RedirectResponse(url="/", status_code=303)
 
 
 @app.post("/w/{token}/settings")

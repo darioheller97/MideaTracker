@@ -105,6 +105,12 @@ def get_watch(token: str) -> dict | None:
     return _watch_row(row) if row else None
 
 
+def delete_watch(token: str) -> bool:
+    with _db() as c:
+        cur = c.execute("DELETE FROM watches WHERE token=?", (token,))
+        return cur.rowcount > 0
+
+
 def all_watches() -> list[dict]:
     with _db() as c:
         rows = c.execute("SELECT * FROM watches").fetchall()
