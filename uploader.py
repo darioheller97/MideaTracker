@@ -23,6 +23,11 @@ logger = logging.getLogger(__name__)
 
 def _config_paths() -> list[Path]:
     paths: list[Path] = []
+    try:                                         # persistent per-user data dir
+        import config
+        paths.append(config.data_dir() / "upload.json")
+    except Exception:
+        pass
     if getattr(sys, "frozen", False):           # PyInstaller .exe → look beside the exe
         paths.append(Path(sys.executable).resolve().parent / "upload.json")
     paths.append(Path(__file__).resolve().parent / "upload.json")   # source checkout
@@ -44,14 +49,23 @@ def load_upload_config() -> dict | None:
     return None
 
 
-def upload_results(results: dict[str, list[dict]], shops_cfg: dict) -> bool:
-    """POST the online (non-local) shops' results to the web app. Returns True on 200.
+def is_configured() -> bool:
+    """True when an upload target (env vars or upload.json) is available."""
+    return load_upload_config() is not None
+
+
+def upload_results(results: dict[str, list[dict]], shops_cfg: dict,
+                   enabled: bool = True) -> tuple[bool, int, str]:
+    """POST the online (non-local) shops' results to the web app.
 
     ``results`` is {shop_key: [result dicts]}; ``shops_cfg`` is config["shops"], used
-    to drop local/city-specific shops. Safe to call from a background thread."""
+    to drop local/city-specific shops. ``enabled`` lets the caller honor a user toggle.
+    Returns (ok, shop_count, message). Safe to call from a background thread."""
+    if not enabled:
+        return False, 0, "deaktiviert"
     cfg = load_upload_config()
     if not cfg:
-        return False
+        return False, 0, "nicht konfiguriert"
     payload_shops: dict[str, list] = {}
     for key, items in results.items():
         if shops_cfg.get(key, {}).get("local", False):
@@ -59,7 +73,7 @@ def upload_results(results: dict[str, list[dict]], shops_cfg: dict) -> bool:
         if isinstance(items, list):
             payload_shops[key] = items
     if not payload_shops:
-        return False
+        return False, 0, "keine Online-Shops"
     try:
         import requests
         r = requests.post(
@@ -67,10 +81,11 @@ def upload_results(results: dict[str, list[dict]], shops_cfg: dict) -> bool:
             headers={"X-Ingest-Token": cfg["secret"]}, timeout=20,
         )
         if r.status_code == 200:
-            logger.info("Uploaded %d shop(s) to web app: %s",
-                        len(payload_shops), ", ".join(sorted(payload_shops)))
-            return True
+            n = len(payload_shops)
+            logger.info("Uploaded %d shop(s) to web app: %s", n, ", ".join(sorted(payload_shops)))
+            return True, n, f"{n} Shops gesendet"
         logger.warning("Upload failed: HTTP %d %s", r.status_code, r.text[:200])
+        return False, 0, f"HTTP {r.status_code}"
     except Exception as e:
         logger.warning("Upload error: %s", e)
-    return False
+        return False, 0, str(e)[:60]

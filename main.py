@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -130,6 +131,11 @@ class ScanWorker(QThread):
     def __init__(self, config: dict):
         super().__init__()
         self._config = config
+        self._cancelled = False
+
+    def cancel(self):
+        """Request cancellation; in-flight shop fetches are abandoned (ignored)."""
+        self._cancelled = True
 
     def run(self):
         from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -139,6 +145,8 @@ class ScanWorker(QThread):
             futures = {pool.submit(scrapers.scrape_shop, k, v["url"], config=self._config): k
                        for k, v in shops.items()}
             for fut in as_completed(futures):
+                if self._cancelled:
+                    break
                 k = futures[fut]
                 try:
                     items = fut.result()
@@ -147,8 +155,33 @@ class ScanWorker(QThread):
                 self.shop_done.emit(k, items)
         self.finished_all.emit()
 
+
+class UploadWorker(QThread):
+    """Uploads online-shop results to the web app off the GUI thread and reports
+    the outcome so the status bar can show whether the residential-IP share worked."""
+
+    done = pyqtSignal(bool, int, str)   # ok, shop_count, message
+
+    def __init__(self, results: dict, shops_cfg: dict, enabled: bool):
+        super().__init__()
+        self._results = results
+        self._shops_cfg = shops_cfg
+        self._enabled = enabled
+
+    def run(self):
+        try:
+            ok, count, msg = uploader.upload_results(
+                self._results, self._shops_cfg, enabled=self._enabled)
+        except Exception as e:
+            ok, count, msg = False, 0, str(e)[:60]
+        self.done.emit(ok, count, msg)
+
+
 HERE = Path(__file__).resolve().parent
-STATE_FILE = HERE / "last_prices.json"
+# Persist state in the user data dir (survives restarts in the frozen .exe; see
+# config.data_dir()). Using HERE here would land in the wiped _MEIPASS temp dir.
+STATE_FILE = cfgmod.data_dir() / "last_prices.json"
+SCAN_META_FILE = cfgmod.data_dir() / "scan_meta.json"
 
 
 def _fmt_price(p: float | None) -> str:
@@ -159,6 +192,20 @@ def _fmt_price(p: float | None) -> str:
 
 def _date_ts() -> str:
     return datetime.now().strftime("%d.%m.%Y %H:%M")
+
+
+def _fmt_ago(ts: float) -> str:
+    """Human 'X ago' in German for a unix timestamp."""
+    secs = max(0, int(time.time() - ts))
+    if secs < 60:
+        return "gerade eben"
+    mins = secs // 60
+    if mins < 60:
+        return f"vor {mins} min"
+    hours = mins // 60
+    if hours < 24:
+        return f"vor {hours} h"
+    return f"vor {hours // 24} Tag(en)"
 
 
 # ---------------------------------------------------------------------------
@@ -173,6 +220,14 @@ class MainWindow(QMainWindow):
 
         self._config: dict = cfgmod.load_config()
         self._last_prices: dict[str, float] = self._load_last_prices()
+        self._last_scan_ts: float = self._load_scan_meta()
+        self._settings_dialog = None
+        # Scan/summary state (initialised so _refresh_summary is safe before any scan)
+        self._scan_done = 0
+        self._scan_total = 0
+        self._best_price = None
+        self._best_shop = ""
+        self._best_title = ""
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._on_auto_scan)
         self._tray = None
@@ -182,11 +237,21 @@ class MainWindow(QMainWindow):
         self._apply_config()
         self._update_status('Bereit — Klicke auf "Jetzt Scannen"')
         self._start_timer()
+        self._refresh_summary()
+
+        # Keep the "last scanned … ago" text current.
+        self._freshness_timer = QTimer(self)
+        self._freshness_timer.timeout.connect(self._refresh_summary)
+        self._freshness_timer.start(60 * 1000)
 
         # Check for updates silently in background (only in packaged .exe)
         self._update_checker = UpdateChecker()
         self._update_checker.update_found.connect(self._on_update_found)
         self._update_checker.start()
+
+        # Optional scan on startup so the table isn't empty on launch.
+        if self._config.get("scan_on_startup", True):
+            QTimer.singleShot(600, self._on_scan)
 
     # ------------------------------------------------------------------
     # UI
@@ -207,12 +272,16 @@ class MainWindow(QMainWindow):
         toolbar = QHBoxLayout()
         self._btn_scan = QPushButton("🔍 Jetzt scannen")
         self._btn_scan.clicked.connect(self._on_scan)
+        self._btn_export = QPushButton("⬇ CSV")
+        self._btn_export.setToolTip("Aktuelle Ergebnisse als CSV speichern")
+        self._btn_export.clicked.connect(self._on_export_csv)
         self._btn_settings = QPushButton("⚙ Einstellungen")
         self._btn_settings.clicked.connect(self._on_settings)
         self._lbl_auto = QLabel("⏱ Auto-Scan aktiv")
         self._lbl_auto.setStyleSheet("color: #2e7d32; font-weight: bold;")
 
         toolbar.addWidget(self._btn_scan)
+        toolbar.addWidget(self._btn_export)
         toolbar.addStretch()
         toolbar.addWidget(self._lbl_auto)
         toolbar.addWidget(self._btn_settings)
@@ -322,10 +391,14 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _on_scan(self):
+        # If a scan is already running, the button acts as Cancel.
         if getattr(self, "_worker", None) is not None and self._worker.isRunning():
+            self._worker.cancel()
+            self._btn_scan.setEnabled(False)
+            self._btn_scan.setText("⏳ Abbrechen …")
+            self._update_status("Scan wird abgebrochen …")
             return
-        self._btn_scan.setEnabled(False)
-        self._btn_scan.setText("🔍 Scanne …")
+        self._btn_scan.setText("✖ Abbrechen")
         self._table.setRowCount(0)
         self._scan_results = {}
         self._best_price = None
@@ -350,23 +423,38 @@ class MainWindow(QMainWindow):
         self._update_status(f"Scanne Shops … ({self._scan_done}/{self._scan_total})")
 
     def _on_scan_finished(self):
+        cancelled = getattr(self._worker, "_cancelled", False)
+        self._btn_scan.setEnabled(True)
+        self._btn_scan.setText("🔍 Jetzt scannen")
+        if cancelled:
+            self._update_status("Scan abgebrochen")
+            self._refresh_summary()
+            return
         # Re-render grouped/sorted for a tidy final layout, then notify.
         self._display_results(self._scan_results)
         self._check_deals(self._scan_results)
-        self._btn_scan.setEnabled(True)
-        self._btn_scan.setText("🔍 Jetzt scannen")
+        self._last_scan_ts = time.time()
+        self._save_scan_meta()
+        self._refresh_summary()
         self._upload_results_async()
 
     def _upload_results_async(self):
         """Share this residential-IP scan's online-shop results with the web app
-        (so phone users see the bot-protected shops). Fire-and-forget; no-op unless
-        upload.json / env vars are configured. Runs off the GUI thread."""
+        (so phone users see the bot-protected shops), reporting the outcome in the
+        status bar. No-op unless enabled and configured (upload.json / env vars)."""
         import copy
-        import threading
+        enabled = self._config.get("upload", {}).get("enabled", True)
+        if not enabled or not uploader.is_configured():
+            return
         results = copy.deepcopy(self._scan_results)
         shops_cfg = self._config.get("shops", {})
-        threading.Thread(target=uploader.upload_results,
-                         args=(results, shops_cfg), daemon=True).start()
+        self._uploader = UploadWorker(results, shops_cfg, enabled)
+        self._uploader.done.connect(self._on_upload_done)
+        self._uploader.start()
+
+    def _on_upload_done(self, ok: bool, count: int, msg: str):
+        icon = "↑✓" if ok else "↑✗"
+        self._update_status(f"{icon} Web-App: {msg}")
 
     def _on_auto_scan(self):
         logger.info("Auto-scan triggered")
@@ -472,14 +560,18 @@ class MainWindow(QMainWindow):
         self._refresh_summary()
 
     def _refresh_summary(self, total: int | None = None):
-        label = (f"{total} Shops durchsucht" if total is not None
-                 else f"{self._scan_done}/{self._scan_total} Shops")
-        parts = [label]
+        parts = []
+        if total is not None:
+            parts.append(f"{total} Shops durchsucht")
+        elif self._scan_total:
+            parts.append(f"{self._scan_done}/{self._scan_total} Shops")
         if self._best_price is not None:
             parts.append(f"🏆 Günstigster: {self._best_price:.2f} € bei {self._best_shop}")
             if self._best_title:
                 parts.append(f"({self._best_title})")
-        self._lbl_summary.setText(" — ".join(parts))
+        if self._last_scan_ts:
+            parts.append(f"🕒 Zuletzt gescannt: {_fmt_ago(self._last_scan_ts)}")
+        self._lbl_summary.setText("  —  ".join(parts) if parts else "Noch kein Scan")
 
     def _display_results(self, results: dict[str, list[dict[str, Any]]]):
         flat = self._flatten(results)
@@ -636,12 +728,25 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _on_settings(self):
-        dialog = SettingsDialog(self._config, self)
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            self._config = dialog.get_config()
+        # Guard against opening a second dialog while one is already open.
+        if self._settings_dialog is not None and self._settings_dialog.isVisible():
+            self._settings_dialog.raise_()
+            self._settings_dialog.activateWindow()
+            return
+        self._settings_dialog = SettingsDialog(self._config, self)
+        accepted = self._settings_dialog.exec() == QDialog.DialogCode.Accepted
+        if accepted:
+            cfg = self._settings_dialog.get_config()
+            # Validate: ensure price min ≤ max (swap if reversed).
+            pr = cfg.get("price_range", {})
+            if pr.get("min", 0) > pr.get("max", 0):
+                pr["min"], pr["max"] = pr["max"], pr["min"]
+                self._notify("Einstellungen", "Min-/Max-Preis vertauscht (min war größer als max).")
+            self._config = cfg
             cfgmod.save_config(self._config)
             self._start_timer()
             self._update_status("⚙ Einstellungen gespeichert")
+        self._settings_dialog = None
 
     # ------------------------------------------------------------------
     # State
@@ -672,6 +777,48 @@ class MainWindow(QMainWindow):
                 json.dump(self._last_prices, f, indent=2)
         except Exception as e:
             logger.warning("Could not save last_prices: %s", e)
+
+    def _load_scan_meta(self) -> float:
+        try:
+            with open(SCAN_META_FILE, "r", encoding="utf-8") as f:
+                return float(json.load(f).get("last_scan_ts", 0) or 0)
+        except (FileNotFoundError, json.JSONDecodeError, ValueError, TypeError, OSError):
+            return 0.0
+
+    def _save_scan_meta(self):
+        try:
+            with open(SCAN_META_FILE, "w", encoding="utf-8") as f:
+                json.dump({"last_scan_ts": self._last_scan_ts}, f)
+        except Exception as e:
+            logger.warning("Could not save scan_meta: %s", e)
+
+    def _on_export_csv(self):
+        """Save the current results to a CSV (semicolon-delimited, Excel-friendly)."""
+        if not getattr(self, "_scan_results", None):
+            self._update_status("Keine Ergebnisse zum Exportieren")
+            return
+        import csv
+        from PyQt5.QtWidgets import QFileDialog
+        default = f"portasplit_{datetime.now().strftime('%Y%m%d_%H%M')}.csv"
+        path, _ = QFileDialog.getSaveFileName(self, "Als CSV speichern", default, "CSV (*.csv)")
+        if not path:
+            return
+        flat = self._flatten(self._scan_results)
+        flat.sort(key=lambda x: (x["sort_group"], x["sort_price"]))
+        try:
+            with open(path, "w", newline="", encoding="utf-8-sig") as f:
+                w = csv.writer(f, delimiter=";")
+                w.writerow(["Shop", "Produkt", "Preis (€)", "Status", "Lieferzeit", "URL"])
+                for it in flat:
+                    status = ("Lieferbar" if it["in_stock"] is True else
+                              "Nicht verfügbar" if it["in_stock"] is False else
+                              (it.get("error") or "Unbekannt"))
+                    price = f"{it['price']:.2f}" if it.get("price") else ""
+                    w.writerow([it["shop_name"], it["title"], price, status,
+                                it.get("delivery", ""), it.get("url", "")])
+            self._update_status(f"CSV gespeichert: {path}")
+        except Exception as e:
+            self._update_status(f"CSV-Fehler: {e}")
 
     # ------------------------------------------------------------------
     # Close → minimize to tray

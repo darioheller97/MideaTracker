@@ -2,6 +2,7 @@
 
 from typing import Any
 
+import uploader
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QFont, QDesktopServices
 from PyQt5.QtWidgets import (
@@ -72,6 +73,8 @@ class SettingsDialog(QDialog):
         self._interval.setSuffix(" Minuten")
         self._interval.setSingleStep(5)
         interval_layout.addRow("Alle:", self._interval)
+        self._scan_on_startup = QCheckBox("Beim Start automatisch scannen")
+        interval_layout.addRow("", self._scan_on_startup)
         layout.addWidget(interval_group)
 
         # -- Products --
@@ -111,6 +114,24 @@ class SettingsDialog(QDialog):
                 local_layout.addWidget(cb, i // 2, i % 2)
             layout.addWidget(local_group)
 
+        # -- Web-App Upload --
+        upload_group = QGroupBox("🌐 Web-App-Upload")
+        upload_layout = QVBoxLayout(upload_group)
+        self._upload_enabled = QCheckBox(
+            "Ergebnisse an die Web-App senden (midea.icetea.me)")
+        upload_layout.addWidget(self._upload_enabled)
+        configured = uploader.is_configured()
+        status = ("✅ konfiguriert" if configured
+                  else "⚠ nicht konfiguriert (upload.json fehlt)")
+        hint = QLabel(
+            f"{status} — teilt deine (nicht blockierten) Online-Shop-Preise, damit "
+            "Handy-Nutzer auch die bot-geschützten Shops sehen. Lokale Filialen "
+            "(OBI/Toom) werden nicht gesendet.")
+        hint.setWordWrap(True)
+        hint.setStyleSheet("color: #666; font-size: 11px;")
+        upload_layout.addWidget(hint)
+        layout.addWidget(upload_group)
+
         # -- Buy Me a Coffee --
         bmc_layout = QHBoxLayout()
         bmc_layout.addStretch()
@@ -142,6 +163,9 @@ class SettingsDialog(QDialog):
         self._price_min.setValue(pr.get("min", 600))
         self._price_max.setValue(pr.get("max", 1800))
         self._interval.setValue(self._config.get("check_interval_minutes", 30))
+        self._scan_on_startup.setChecked(self._config.get("scan_on_startup", True))
+        self._upload_enabled.setChecked(
+            self._config.get("upload", {}).get("enabled", True))
 
         for prod in self._config.get("products", []):
             cb = self._product_checks.get(prod["key"])
@@ -166,6 +190,10 @@ class SettingsDialog(QDialog):
             "max": self._price_max.value(),
         }
         cfg["check_interval_minutes"] = self._interval.value()
+        cfg["scan_on_startup"] = self._scan_on_startup.isChecked()
+        upload = dict(cfg.get("upload", {}))
+        upload["enabled"] = self._upload_enabled.isChecked()
+        cfg["upload"] = upload
 
         for prod in cfg.get("products", []):
             cb = self._product_checks.get(prod["key"])
